@@ -119,7 +119,8 @@ public:
     void StartDataUpdateTask();
     
     // 刷新右下角备忘录列表显示（从 NVS 读取后格式化显示）
-    void RefreshMemoDisplay();
+    void RefreshMemoDisplay();           // 自动获取锁（外部调用用这个）
+    void RefreshMemoDisplayInternal();   // 不获取锁（已持锁时用这个，避免死锁）
 };
 
 #endif

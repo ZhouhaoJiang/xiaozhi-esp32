@@ -288,13 +288,29 @@ private:
     }
 
     uint8_t BatterygetPercent() {
+        // 静态变量用于指数移动平均（EMA）滤波，消除 ADC 噪声导致的电量漂移
+        static float ema_voltage = 0.0f;    // 平滑后的电压值
+        static bool ema_initialized = false;
+        const float alpha = 0.1f;           // 平滑系数：越小越平滑（0.1 ≈ 约 10 次采样才能跟上真实变化）
+
+        // 采样 10 次取平均（减少瞬时噪声）
         int voltage = 0;
         for (uint8_t i = 0; i < 10; i++) {
             voltage += BatterygetVoltage();
         }
         voltage /= 10;
+
+        // EMA 滤波：new_value = alpha * 当前值 + (1-alpha) * 历史值
+        if (!ema_initialized) {
+            ema_voltage = (float)voltage;
+            ema_initialized = true;
+        } else {
+            ema_voltage = alpha * (float)voltage + (1.0f - alpha) * ema_voltage;
+        }
+
+        int smoothed = (int)(ema_voltage + 0.5f);  // 四舍五入
         // 电压→百分比映射（抛物线拟合）
-        int percent = (-1 * voltage * voltage + 9016 * voltage - 19189000) / 10000;
+        int percent = (-1 * smoothed * smoothed + 9016 * smoothed - 19189000) / 10000;
         percent = (percent > 100) ? 100 : (percent < 0) ? 0 : percent;
         return (uint8_t)percent;
     }

@@ -451,8 +451,8 @@ void CustomLcdDisplay::LoadMemoFromNvs() {
     RefreshMemoDisplay();
 }
 
-void CustomLcdDisplay::RefreshMemoDisplay() {
-    DisplayLockGuard lock(this);
+// 内部版本：不获取锁（调用者必须已持有 DisplayLock）
+void CustomLcdDisplay::RefreshMemoDisplayInternal() {
     if (!memo_list_label_) return;
 
     // 从 NVS 读取 JSON 数组
@@ -502,6 +502,12 @@ void CustomLcdDisplay::RefreshMemoDisplay() {
     cJSON_Delete(arr);
     lv_label_set_text(memo_list_label_, display_text.c_str());
     ESP_LOGI(TAG, "备忘列表已刷新，共 %d 条", count);
+}
+
+// 外部版本：自动获取锁（供 MCP 工具等外部调用）
+void CustomLcdDisplay::RefreshMemoDisplay() {
+    DisplayLockGuard lock(this);
+    RefreshMemoDisplayInternal();
 }
 
 // ===== AI 消息适配（重写小智的方法，只更新左下角卡片）=====
@@ -708,13 +714,14 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
 
                 // ===== 备忘闹钟：检查是否有备忘的时间匹配当前 HH:MM =====
                 if (time_synced) {
-                    Settings memo_settings("memo", false);
-                    std::string memo_json = memo_settings.GetString("items", "");
+                    Settings memo_rd("memo", false);
+                    std::string memo_json = memo_rd.GetString("items", "");
                     if (!memo_json.empty()) {
                         cJSON *memo_arr = cJSON_Parse(memo_json.c_str());
                         if (memo_arr && cJSON_IsArray(memo_arr)) {
-                            int memo_count = cJSON_GetArraySize(memo_arr);
-                            for (int mi = 0; mi < memo_count; mi++) {
+                            bool memo_changed = false;
+                            // 倒序遍历，这样删除不会打乱前面的索引
+                            for (int mi = cJSON_GetArraySize(memo_arr) - 1; mi >= 0; mi--) {
                                 cJSON *memo_item = cJSON_GetArrayItem(memo_arr, mi);
                                 cJSON *mt = cJSON_GetObjectItem(memo_item, "t");
                                 cJSON *mc = cJSON_GetObjectItem(memo_item, "c");
@@ -722,14 +729,30 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                                 if (mt && mt->valuestring && strlen(mt->valuestring) == 5 
                                     && mt->valuestring[2] == ':') {
                                     if (strcmp(mt->valuestring, time_buf) == 0) {
-                                        // 时间到了！语音提醒
                                         const char *memo_text = (mc && mc->valuestring) ? mc->valuestring : "备忘提醒";
-                                        char alert_msg[128];
-                                        snprintf(alert_msg, sizeof(alert_msg), "备忘提醒: %s %s", mt->valuestring, memo_text);
-                                        ESP_LOGI("DataUpdate", "触发备忘闹钟: %s", alert_msg);
-                                        app.Alert("提醒", alert_msg, "happy", "");
+                                        char alert_buf[128];
+                                        snprintf(alert_buf, sizeof(alert_buf), "备忘提醒: %s %s", mt->valuestring, memo_text);
+                                        ESP_LOGI("DataUpdate", "触发备忘闹钟: %s", alert_buf);
+                                        
+                                        // 直接打断当前状态，立即提醒（用 popup 音效）
+                                        app.Alert("提醒", alert_buf, "happy", Lang::Sounds::OGG_POPUP);
+
+                                        // 触发后从列表中删除这条
+                                        cJSON_DeleteItemFromArray(memo_arr, mi);
+                                        memo_changed = true;
                                     }
                                 }
+                            }
+                            // 如果有条目被删除，写回 NVS 并刷新屏幕
+                            if (memo_changed) {
+                                char *new_json = cJSON_PrintUnformatted(memo_arr);
+                                {
+                                    Settings memo_wr("memo", true);
+                                    memo_wr.SetString("items", new_json);
+                                }
+                                cJSON_free(new_json);
+                                self->RefreshMemoDisplayInternal();  // 已持锁，用内部版本避免死锁
+                                ESP_LOGI("DataUpdate", "已过期备忘已自动删除");
                             }
                             cJSON_Delete(memo_arr);
                         }
@@ -819,7 +842,7 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                 last_ds = ds;
             }
         }  // DisplayLockGuard 自动释放
-        
+
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
