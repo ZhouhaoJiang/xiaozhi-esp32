@@ -13,8 +13,6 @@ protected:
 
     virtual int Write(const int16_t* data, int samples) override;
     virtual int Read(int16_t* dest, int samples) override;
-    virtual void EnableInput(bool enable) override;
-    virtual void EnableOutput(bool enable) override;
 
 public:
     virtual ~NoAudioCodec();

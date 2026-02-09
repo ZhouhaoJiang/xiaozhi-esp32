@@ -52,6 +52,9 @@ public:
         // 状态栏容器适配
         lv_obj_set_style_pad_left(top_bar_, LV_HOR_RES * 0.12, 0);  // 左侧填充12%
         lv_obj_set_style_pad_right(top_bar_, LV_HOR_RES * 0.12, 0); // 右侧填充12%
+        // 兼容旧状态栏容器（部分主题/布局仍会读 status_bar_）
+        lv_obj_set_style_pad_left(status_bar_, LV_HOR_RES * 0.167, 0);
+        lv_obj_set_style_pad_right(status_bar_, LV_HOR_RES * 0.167, 0);
         // 表情容器上移适配
         lv_obj_align(emoji_box_, LV_ALIGN_CENTER, 0, -30);          // 向上偏移30
         // 消息栏适配

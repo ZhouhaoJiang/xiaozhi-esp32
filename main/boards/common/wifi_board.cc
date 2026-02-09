@@ -24,7 +24,7 @@
 static const char *TAG = "WifiBoard";
 
 // Connection timeout in seconds
-static constexpr int CONNECT_TIMEOUT_SEC = 60;
+static constexpr int CONNECT_TIMEOUT_SEC = 30;
 
 WifiBoard::WifiBoard() {
     // Create connection timeout timer

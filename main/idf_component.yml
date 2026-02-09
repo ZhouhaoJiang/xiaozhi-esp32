@@ -22,7 +22,7 @@ dependencies:
   78/esp-wifi-connect: ~3.0.2
   espressif/esp_audio_effects: ~1.2.1
   espressif/esp_audio_codec: ~2.4.1
-  78/esp-ml307: ~3.6.4
+  78/esp-ml307: ~3.6.3
   78/uart-eth-modem:
     version: ~0.3.3
     rules:
@@ -72,7 +72,7 @@ dependencies:
     - if: target in [esp32s3]
 
   tny-robotics/sh1106-esp-idf: ^1.0.0
-  espressif/esp_lcd_jd9365:
+  waveshare/esp_lcd_jd9365_10_1:
     version: '*'
     rules:
     - if: target in [esp32p4]
@@ -120,6 +120,7 @@ dependencies:
     version: ^0.3.1
     rules:
     - if: target in [esp32s3, esp32p4]
+  espressif/zlib: "^1.2.13"
 
   ## Required IDF version
   idf:
