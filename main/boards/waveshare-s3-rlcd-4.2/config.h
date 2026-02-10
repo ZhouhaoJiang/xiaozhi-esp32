@@ -24,6 +24,7 @@
 #define AUDIO_CODEC_ES7210_ADDR  ES7210_CODEC_DEFAULT_ADDR
 
 #define BOOT_BUTTON_GPIO        GPIO_NUM_0
+#define USER_BUTTON_GPIO        GPIO_NUM_18  // 用户按键（屏幕右侧 KEY 按钮）
 
 
 #define RLCD_DC_PIN    GPIO_NUM_5  

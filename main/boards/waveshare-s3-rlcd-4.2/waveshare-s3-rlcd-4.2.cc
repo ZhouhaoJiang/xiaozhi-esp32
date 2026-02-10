@@ -2,6 +2,8 @@
 #include <driver/i2c_master.h>
 #include <driver/spi_common.h>
 #include <esp_log.h>
+#include <esp_system.h>
+#include <soc/rtc.h>
 #include "custom_lcd_display.h"
 #include "wifi_board.h"
 #include "application.h"
@@ -14,6 +16,10 @@
 #include <cJSON.h>
 #include "lvgl.h"
 #include "managers/sensor_manager.h"
+
+// 声明小智字体（用于系统信息显示时临时切换字体大小）
+LV_FONT_DECLARE(font_puhui_14_1);
+LV_FONT_DECLARE(font_puhui_16_4);
 #include "managers/weather_manager.h"
 
 #define TAG "waveshare_rlcd_4_2"
@@ -22,6 +28,7 @@ class CustomBoard : public WifiBoard {
 private:
     i2c_master_bus_handle_t i2c_bus_;
     Button boot_button_;
+    Button user_button_;  // GPIO18 用户按键
     CustomLcdDisplay *display_;
     adc_oneshot_unit_handle_t adc1_handle;
     adc_cali_handle_t cali_handle;
@@ -52,6 +59,7 @@ private:
     }
 
     void InitializeButtons() { 
+        // BOOT 按钮（GPIO0）- 主要交互按键
         boot_button_.OnClick([this]() {
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
@@ -61,18 +69,213 @@ private:
             app.ToggleChatState();
         });
 
-#if CONFIG_USE_DEVICE_AEC
-        boot_button_.OnDoubleClick([this]() {
-            auto& app = Application::GetInstance();
-            if (app.GetDeviceState() == kDeviceStateIdle) {
-                app.SetAecMode(app.GetAecMode() == kAecOff ? kAecOnDeviceSide : kAecOff);
+        // USER 按钮（GPIO18）- 辅助功能按键
+        user_button_.OnClick([this]() {
+            // 单击：切换屏幕显示模式（预留给多布局切换功能）
+            // TODO: 实现多屏幕模式切换
+            if (display_) {
+                display_->SetChatMessage("system", "屏幕模式切换\n功能开发中...");
             }
+            ESP_LOGI(TAG, "USER 按钮单击：屏幕模式切换（待实现）");
         });
-#endif
+
+        user_button_.OnDoubleClick([this]() {
+            // 双击：刷新所有数据（天气、传感器、时间）
+            RefreshAllData();
+        });
+
+        user_button_.OnLongPress([this]() {
+            // 长按：显示系统信息
+            ShowSystemInfo();
+        });
+    }
+
+    // USER 按钮功能实现
+    void ShowSystemInfo() {
+        // 显示详细系统信息到 AI 对话区（启用多行滚动）
+        char info[512];
+        
+        // 内存信息
+        size_t free_heap = esp_get_free_heap_size();
+        size_t total_heap = heap_caps_get_total_size(MALLOC_CAP_8BIT);
+        size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+        size_t total_psram = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+        
+        // CPU 信息
+        rtc_cpu_freq_config_t cpu_freq_conf;
+        rtc_clk_cpu_freq_get_config(&cpu_freq_conf);
+        uint32_t cpu_freq_mhz = cpu_freq_conf.freq_mhz;
+        
+        // 电池信息
+        int battery_level = 0;
+        bool charging = false, discharging = false;
+        GetBatteryLevel(battery_level, charging, discharging);
+        
+        // WiFi 信息
+        auto& app = Application::GetInstance();
+        const char* wifi_status = "未连接";
+        if (app.GetDeviceState() != kDeviceStateStarting && 
+            app.GetDeviceState() != kDeviceStateWifiConfiguring) {
+            wifi_status = "已连接";
+        }
+        
+        // 运行时间
+        uint64_t uptime_sec = esp_timer_get_time() / 1000000;
+        uint32_t uptime_hours = uptime_sec / 3600;
+        uint32_t uptime_mins = (uptime_sec % 3600) / 60;
+        
+        // 计算百分比
+        int heap_percent = (int)(((total_heap - free_heap) * 100.0f) / total_heap);
+        int psram_percent = total_psram > 0 ? 
+                           (int)(((total_psram - free_psram) * 100.0f) / total_psram) : 0;
+        
+        // 详细格式（单份内容，用于鱼咬尾拼接）
+        snprintf(info, sizeof(info), 
+                 "=== 系统信息 ===\n"
+                 "CPU: %luMHz\n"
+                 "运行: %luh%lumin\n"
+                 "SRAM: \n %dKB/%dKB (%d%%)\n"
+                 "PSRAM: \n %dMB/%dMB (%d%%)\n"
+                 "电池: %d%% %s\n"
+                 "WiFi: %s\n"
+                 "==============\n"
+                 "\n",  // 分隔符
+                 cpu_freq_mhz,
+                 uptime_hours, uptime_mins,
+                 (total_heap - free_heap) / 1024, total_heap / 1024, heap_percent,
+                 (total_psram - free_psram) / 1024 / 1024, total_psram / 1024 / 1024, psram_percent,
+                 battery_level, charging ? "充电中" : "放电中",
+                 wifi_status);
+        
+        if (display_) {
+            lv_obj_t* chat_label = display_->GetChatStatusLabel();
+            if (chat_label) {
+                // 暂停 DataUpdateTask 对 UI 的更新（避免锁竞争导致 watchdog 超时）
+                display_->SetShowingSystemInfo(true);
+                
+                {
+                    DisplayLockGuard lock(display_);
+                    
+                    // 先删除旧动画（防止冲突）
+                    lv_anim_delete(chat_label, nullptr);
+                    
+                    // 🐟 鱼咬尾：拼接两份相同内容
+                    std::string info_double = std::string(info) + std::string(info);
+                    
+                    // 🔑 关键修复：切换到 TOP_LEFT 绝对定位
+                    // 原因：label 初始化时用的是 LV_ALIGN_LEFT_MID（居中对齐），
+                    // LVGL 内部会存储这个对齐方式，布局刷新时会重新计算位置，
+                    // 导致动画里 set_y 设的值被覆盖。
+                    // 切换到 TOP_LEFT 后，Y=0 就是父容器顶部，动画不会被干扰。
+                    const int text_x = 64 + 20;  // emotion_w + 间距，保持文字在分隔线右侧
+                    lv_obj_align(chat_label, LV_ALIGN_TOP_LEFT, text_x, 0);
+                    
+                    lv_label_set_text(chat_label, info_double.c_str());
+                    lv_label_set_long_mode(chat_label, LV_LABEL_LONG_WRAP);
+                    
+                    // 强制计算布局，获取实际高度
+                    lv_obj_update_layout(chat_label);
+                    int label_h = lv_obj_get_height(chat_label);  // 双份内容的总高度
+                    int single_h = label_h / 2;  // 单份内容高度
+                    
+                    // 🐟 鱼咬尾动画原理：
+                    // 内容 = [A][A]（两份完全相同的文字首尾相接）
+                    // Y=0 时显示第一个 A 的开头
+                    // 向上滚动到 Y=-single_h 时，显示第二个 A 的开头
+                    // 因为两个 A 完全一样，动画重复跳回 Y=0 时视觉上无缝衔接！
+                    lv_anim_t a;
+                    lv_anim_init(&a);
+                    lv_anim_set_var(&a, chat_label);
+                    lv_anim_set_values(&a, 0, -single_h);
+                    lv_anim_set_delay(&a, 1500);  // 开始前停顿 1.5 秒，让用户先看到开头
+                    lv_anim_set_duration(&a, single_h * 30);  // 速度：每像素 30ms
+                    lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+                    lv_anim_set_repeat_delay(&a, 0);  // 无缝重复，不停顿
+                    lv_anim_set_exec_cb(&a, [](void *obj, int32_t v) {
+                        lv_obj_set_y((lv_obj_t *)obj, v);
+                    });
+                    lv_anim_start(&a);
+                }  // ← DisplayLockGuard 在这里自动释放
+            }
+        }
+        
+        ESP_LOGI(TAG, "系统信息: CPU=%luMHz, 运行=%luh%lumin, SRAM=%d%%, PSRAM=%d%%, 电量=%d%%", 
+                 cpu_freq_mhz, uptime_hours, uptime_mins, heap_percent, psram_percent, battery_level);
+    }
+
+    void RefreshAllData() {
+        ESP_LOGI(TAG, "手动刷新所有数据...");
+        
+        // 立即更新天气数据
+        WeatherManager::getInstance().update();
+        
+        // 重新同步 NTP 时间
+        SensorManager::getInstance().syncNtpTime();
+        
+        // 强制刷新屏幕显示
+        if (display_) {
+            display_->SetChatMessage("system", "正在刷新数据...\n天气、时间已更新");
+        }
+        
+        ESP_LOGI(TAG, "数据刷新完成");
     }
 
     void InitializeTools() {
         auto& mcp_server = McpServer::GetInstance();
+        
+        // ===== 系统信息工具 =====
+        mcp_server.AddTool("self.system.info",
+            "Get device system information (CPU, memory, battery, WiFi status).\n"
+            "Use when user asks: '系统信息', 'CPU频率', '内存使用情况', '电量多少', 'system status', 'how much RAM'",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                // 收集系统信息
+                size_t free_heap = esp_get_free_heap_size();
+                size_t total_heap = heap_caps_get_total_size(MALLOC_CAP_8BIT);
+                size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+                size_t total_psram = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+                
+                rtc_cpu_freq_config_t cpu_freq_conf;
+                rtc_clk_cpu_freq_get_config(&cpu_freq_conf);
+                uint32_t cpu_freq_mhz = cpu_freq_conf.freq_mhz;
+                
+                int battery_level = 0;
+                bool charging = false, discharging = false;
+                GetBatteryLevel(battery_level, charging, discharging);
+                
+                auto& app = Application::GetInstance();
+                const char* wifi_status = "未连接";
+                if (app.GetDeviceState() != kDeviceStateStarting && 
+                    app.GetDeviceState() != kDeviceStateWifiConfiguring) {
+                    wifi_status = "已连接";
+                }
+                
+                uint64_t uptime_sec = esp_timer_get_time() / 1000000;
+                uint32_t uptime_hours = uptime_sec / 3600;
+                uint32_t uptime_mins = (uptime_sec % 3600) / 60;
+                
+                int heap_percent = (int)(((total_heap - free_heap) * 100.0f) / total_heap);
+                int psram_percent = total_psram > 0 ? 
+                                   (int)(((total_psram - free_psram) * 100.0f) / total_psram) : 0;
+                
+                // 格式化为自然语言（AI 容易读出来）
+                char info[512];
+                snprintf(info, sizeof(info),
+                         "系统运行正常。CPU频率%luMHz，已运行%lu小时%lu分钟。"
+                         "内存方面，SRAM使用了%dKB，占总量%dKB的%d%%；"
+                         "PSRAM使用了%dMB，占总量%dMB的%d%%。"
+                         "电池电量%d%%，当前%s。WiFi%s。",
+                         cpu_freq_mhz, uptime_hours, uptime_mins,
+                         (total_heap - free_heap) / 1024, total_heap / 1024, heap_percent,
+                         (total_psram - free_psram) / 1024 / 1024, total_psram / 1024 / 1024, psram_percent,
+                         battery_level, charging ? "正在充电" : "使用电池供电",
+                         wifi_status);
+                
+                ESP_LOGI(TAG, "AI查询系统信息");
+                return std::string(info);
+            });
+        
+        // ===== 配网工具 =====
         mcp_server.AddTool("self.disp.network", "重新配网", PropertyList(),
         [this](const PropertyList&) -> ReturnValue {
             EnterWifiConfigMode();
@@ -316,7 +519,7 @@ private:
     }
 
 public:
-    CustomBoard() : boot_button_(BOOT_BUTTON_GPIO) {    
+    CustomBoard() : boot_button_(BOOT_BUTTON_GPIO), user_button_(USER_BUTTON_GPIO) {    
         InitializeI2c();
         InitializeSensors();  // 在 I2C 初始化后立即初始化传感器
         InitializeButtons();     

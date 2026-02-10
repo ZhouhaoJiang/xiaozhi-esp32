@@ -114,6 +114,14 @@ public:
     AudioService& GetAudioService() { return audio_service_; }
     
     /**
+     * Trigger AI to speak text proactively (e.g., for memo reminders)
+     * This method will interrupt current state if necessary (speaking/listening)
+     * Simulates wake word detection and sends text as STT result
+     * Returns true if message was queued successfully (actual execution is async)
+     */
+    bool TriggerAiReminder(const std::string& reminder_text);
+    
+    /**
      * Reset protocol resources (thread-safe)
      * Can be called from any task to release resources allocated after network connected
      * This includes closing audio channel, resetting protocol and ota objects

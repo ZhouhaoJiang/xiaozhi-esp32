@@ -1043,6 +1043,72 @@ void Application::SendMcpMessage(const std::string& payload) {
     });
 }
 
+bool Application::TriggerAiReminder(const std::string& reminder_text) {
+    // 检查协议是否初始化（不检查状态，允许打断）
+    if (!protocol_) {
+        ESP_LOGW(TAG, "无法触发 AI 提醒：协议未初始化");
+        return false;
+    }
+    
+    auto state = GetDeviceState();
+    ESP_LOGI(TAG, "触发 AI 提醒 (当前状态=%d): %s", state, reminder_text.c_str());
+    
+    // 通过主任务 Schedule 执行，确保线程安全
+    Schedule([this, text = reminder_text]() {
+        auto current_state = GetDeviceState();
+        
+        // 如果正在说话，先打断（发送 abort 消息）
+        if (current_state == kDeviceStateSpeaking) {
+            ESP_LOGI(TAG, "AI 提醒：打断当前说话状态");
+            AbortSpeaking(kAbortReasonNone);
+            // AbortSpeaking 会发送 abort 消息给服务器，稍等一下让服务器处理
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        
+        // 如果正在聆听，先关闭音频通道（停止录音）
+        if (current_state == kDeviceStateListening) {
+            ESP_LOGI(TAG, "AI 提醒：停止当前聆听状态");
+            protocol_->CloseAudioChannel(false);  // 不发送 goodbye，直接关闭
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        
+        // 如果音频通道未打开（或刚被关闭），重新打开
+        if (!protocol_->IsAudioChannelOpened()) {
+            SetDeviceState(kDeviceStateConnecting);
+            
+            // 等待连接建立后继续（再次拷贝 text）
+            std::string text_copy = text;
+            Schedule([this, text_copy]() {
+                if (!protocol_->OpenAudioChannel()) {
+                    ESP_LOGE(TAG, "AI 提醒：音频通道打开失败");
+                    // 打开失败，至少确保回到空闲状态
+                    SetDeviceState(kDeviceStateIdle);
+                    return;
+                }
+                
+                // 连接成功后，模拟唤醒词检测并发送文本
+                // 根据 websocket.md 文档：
+                // {"session_id": "xxx", "type": "listen", "state": "detect", "text": "备忘提醒"}
+                protocol_->SendWakeWordDetected(text_copy);
+                
+                // 立即启动聆听模式，让服务器处理文本并返回 TTS
+                protocol_->SendStartListening(kListeningModeAutoStop);
+                SetDeviceState(kDeviceStateListening);
+                
+                ESP_LOGI(TAG, "AI 提醒已发送，等待服务器回复");
+            });
+        } else {
+            // 音频通道已打开，直接发送（可能刚打断完，通道还在）
+            protocol_->SendWakeWordDetected(text);
+            protocol_->SendStartListening(kListeningModeAutoStop);
+            SetDeviceState(kDeviceStateListening);
+            ESP_LOGI(TAG, "AI 提醒已发送（复用已有连接）");
+        }
+    });
+    
+    return true;
+}
+
 void Application::SetAecMode(AecMode mode) {
     aec_mode_ = mode;
     Schedule([this]() {

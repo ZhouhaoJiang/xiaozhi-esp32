@@ -1,23 +1,12 @@
 #ifndef __CUSTOM_LCD_DISPLAY_H__
 #define __CUSTOM_LCD_DISPLAY_H__
 
+#include <atomic>
 #include <driver/gpio.h>
 #include "lcd_display.h"
+#include "rlcd_driver.h"
 #include "managers/sensor_manager.h"
 #include "managers/weather_manager.h"
-
-enum ColorSelection {
-    ColorBlack = 0,    
-    ColorWhite = 0xff
-};
-
-typedef struct {
-    uint8_t mosi;
-    uint8_t scl;
-    uint8_t dc;
-    uint8_t cs;
-    uint8_t rst;
-} spi_display_config_t;
 
 // 天气站 + AI 混合显示
 // 
@@ -27,33 +16,20 @@ typedef struct {
 // │    "14:30"        │   TUE / 15      │
 // │                   │   晴 25°C       │
 // ├──────────────────┼──────────────────┤
-// │   AI 对话(252x122) │  音乐卡片(126x122) │
-// │  "聆听中..."      │   🎵 黑胶唱片    │
+// │   AI 对话(252x122) │  备忘录(126x122)  │
+// │  "聆听中..."      │   MEMO          │
 // └──────────────────┴──────────────────┘
 // 状态栏浮在右上角（WiFi + 电池 + 温湿度）
+//
+// 代码拆分为多个文件：
+//   rlcd_driver.h/cc      - RLCD 硬件驱动层（SPI、像素映射、初始化命令）
+//   weather_ui.cc          - 天气站 UI 布局（SetupWeatherUI，所有 LVGL 控件创建）
+//   data_update_task.cc    - 后台数据更新任务（时间/天气/传感器/电池/WiFi/AI状态）
+//   custom_lcd_display.cc  - 核心类（构造/析构/AI适配/备忘录/基类重写）
 class CustomLcdDisplay : public LcdDisplay {
 private:
-    esp_lcd_panel_io_handle_t io_handle = NULL;
-    const char         *TAG                 = "CustomDisplay";
-    int                 mosi_;
-    int                 scl_;
-    int                 dc_;
-    int                 cs_;
-    int                 rst_;
-    int                 width_;
-    int                 height_;
-    uint8_t            *DispBuffer = NULL;
-    int                 DisplayLen;
-    uint16_t (*PixelIndexLUT)[300];
-    uint8_t  (*PixelBitLUT  )[300];
-    void InitPortraitLUT();
-    void InitLandscapeLUT();
-    void Set_ResetIOLevel(uint8_t level);
-    void RLCD_SendCommand(uint8_t Reg);
-    void RLCD_SendData(uint8_t Data);
-    void RLCD_Sendbuffera(uint8_t *Data, int len);
-    void RLCD_Reset(void);
-    static void Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p);
+    // RLCD 硬件驱动（独立模块，负责 SPI 通信和像素操作）
+    RlcdDriver *rlcd_ = nullptr;
 
     // ===== 天气站 UI 组件 =====
     // 状态栏（右上角浮动胶囊）
@@ -84,14 +60,25 @@ private:
     // 数据更新任务句柄
     TaskHandle_t update_task_handle_ = nullptr;
     
+    // 系统信息滚动标志（为 true 时暂停 DataUpdateTask 更新，避免锁竞争）
+    std::atomic<bool> showing_system_info_{false};
+    
     // 上次更新的值（用于避免不必要的 UI 刷新）
     int last_min_ = -1;
     time_t last_valid_epoch_ = 0;  // NTP 同步后记录正确的 epoch，用于检测时间被外部篡改
     float last_temp_ = -99.0f;
     float last_humi_ = -99.0f;
 
+    // LVGL flush 回调（将 RGB565 转换为 1-bit 并刷新到 RLCD）
+    static void Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p);
+
+    // UI 创建（实现在 weather_ui.cc）
     void SetupWeatherUI();
+    
+    // 备忘录
     void LoadMemoFromNvs();   // 从 NVS 加载备忘录到 UI
+    
+    // 数据更新任务（实现在 data_update_task.cc）
     static void DataUpdateTask(void *arg);
 
 public:
@@ -99,10 +86,15 @@ public:
                   int width, int height, int offset_x, int offset_y,
                   bool mirror_x, bool mirror_y, bool swap_xy, spi_display_config_t spiconfig, spi_host_device_t spi_host = SPI3_HOST);
     ~CustomLcdDisplay();
-    void RLCD_Init();
-    void RLCD_ColorClear(uint8_t color);
-    void RLCD_Display();
-    void RLCD_SetPixel(uint16_t x, uint16_t y, uint8_t color);
+
+    // 获取 RLCD 驱动（供外部调用硬件方法，如对比度调节）
+    RlcdDriver* rlcd() const { return rlcd_; }
+    
+    // 获取 AI 对话标签（供 CustomBoard 设置滚动模式显示系统信息等）
+    lv_obj_t* GetChatStatusLabel() const { return chat_status_label_; }
+    
+    // 系统信息滚动控制（供 CustomBoard 设置标志，避免 DataUpdateTask 锁竞争）
+    void SetShowingSystemInfo(bool showing) { showing_system_info_ = showing; }
     
     // 重写小智的 AI 显示方法，适配到左下角卡片
     virtual void SetChatMessage(const char* role, const char* content) override;
