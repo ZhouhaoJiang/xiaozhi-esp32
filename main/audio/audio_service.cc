@@ -761,10 +761,33 @@ void AudioService::ResetDecoder() {
     audio_queue_cv_.notify_all();
 }
 
+void AudioService::SetExternalPlaybackActive(bool active) {
+    external_playback_active_ = active;
+    last_output_time_ = std::chrono::steady_clock::now();
+
+    if (active) {
+        // 外部播放（例如 HTTP 音乐直链）期间，保持输出通道常开，避免省电定时器误关导致卡顿。
+        if (!codec_->output_enabled()) {
+            codec_->EnableOutput(true);
+        }
+        esp_timer_stop(audio_power_timer_);
+        esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
+    }
+}
+
 void AudioService::CheckAndUpdateAudioPowerState() {
     auto now = std::chrono::steady_clock::now();
     auto input_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_input_time_).count();
     auto output_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_output_time_).count();
+
+    if (external_playback_active_) {
+        // 外部播放期间允许关闭输入省电，但保持输出开启，防止播放中断/抖动。
+        if (input_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->input_enabled()) {
+            codec_->EnableInput(false);
+        }
+        return;
+    }
+
     if (input_elapsed > AUDIO_POWER_TIMEOUT_MS && codec_->input_enabled()) {
         codec_->EnableInput(false);
     }

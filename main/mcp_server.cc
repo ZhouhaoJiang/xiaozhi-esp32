@@ -62,6 +62,50 @@ void McpServer::AddCommonTools() {
             codec->SetOutputVolume(properties["volume"].value<int>());
             return true;
         });
+
+    AddTool("self.music.play_url",
+        "Play music directly from a URL on device side. Supports MP3 stream playback and can be interrupted by `self.music.stop`. "
+        "Pass lyric_url so the device can fetch lyrics automatically; fallback to lyric text if provided.",
+        PropertyList({
+            Property("url", kPropertyTypeString),
+            Property("title", kPropertyTypeString, std::string("未知歌曲")),
+            Property("artist", kPropertyTypeString, std::string("未知歌手")),
+            Property("lyric", kPropertyTypeString, std::string("")),
+            Property("lyric_url", kPropertyTypeString, std::string(""))
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            bool ok = app.PlayMusicFromUrl(
+                properties["url"].value<std::string>(),
+                properties["title"].value<std::string>(),
+                properties["artist"].value<std::string>(),
+                properties["lyric"].value<std::string>(),
+                properties["lyric_url"].value<std::string>());
+            if (!ok) {
+                throw std::runtime_error("音乐播放失败：请检查 URL 或网络状态");
+            }
+            return std::string("已开始播放音乐");
+        });
+
+    AddTool("self.music.stop",
+        "Stop current local music playback immediately.",
+        PropertyList(),
+        [](const PropertyList&) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            app.StopMusicPlayback();
+            return true;
+        });
+
+    AddTool("self.music.update_lyric",
+        "Update current lyric line on screen while music is playing.",
+        PropertyList({
+            Property("lyric", kPropertyTypeString)
+        }),
+        [](const PropertyList& properties) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            app.UpdateMusicLyric(properties["lyric"].value<std::string>());
+            return true;
+        });
     
     auto backlight = board.GetBacklight();
     if (backlight) {

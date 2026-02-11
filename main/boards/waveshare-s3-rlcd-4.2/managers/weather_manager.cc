@@ -63,10 +63,10 @@ static bool decompress_gzip_safe(const uint8_t* src, int src_len, char* dst, int
     return true;
 }
 
-void WeatherManager::update() {
+bool WeatherManager::update() {
     if (!response_buffer || api_key_.empty() || api_host_.empty()) {
         ESP_LOGW(TAG, "天气 API 未配置或缓冲区未分配");
-        return;
+        return false;
     }
 
     // 第一步：通过和风天气 GeoAPI 进行 IP 定位
@@ -85,13 +85,13 @@ void WeatherManager::update() {
     
     esp_http_client_handle_t geo_client = esp_http_client_init(&geo_config);
     esp_http_client_set_header(geo_client, "Host", api_host_.c_str());
-    esp_http_client_perform(geo_client);
+    esp_err_t geo_err = esp_http_client_perform(geo_client);
     
     // 默认位置（苏州）
     double lat = 31.23, lon = 120.62; 
     std::string city_name = "苏州";
 
-    if (response_len > 0) {
+    if (geo_err == ESP_OK && response_len > 0) {
         response_buffer[response_len] = '\0';
         cJSON *root = cJSON_Parse(response_buffer);
         if (root) {
@@ -108,6 +108,8 @@ void WeatherManager::update() {
             }
             cJSON_Delete(root);
         }
+    } else {
+        ESP_LOGW(TAG, "IP 定位请求失败，使用默认城市");
     }
     esp_http_client_cleanup(geo_client);
 
@@ -133,6 +135,7 @@ void WeatherManager::update() {
     
     esp_err_t err = esp_http_client_perform(client);
     int status_code = esp_http_client_get_status_code(client);
+    bool success = false;
 
     if (err == ESP_OK && status_code == 200 && response_len > 0) {
         int d_len = 0;
@@ -148,11 +151,13 @@ void WeatherManager::update() {
         if (final_json) {
             parseWeatherJson(final_json);
             latest_data_.city = city_name;
+            success = latest_data_.valid;
         }
     } else {
-        ESP_LOGE(TAG, "天气请求失败 (Status %d)", status_code);
+        ESP_LOGE(TAG, "天气请求失败 (err=%d, status=%d)", err, status_code);
     }
     esp_http_client_cleanup(client);
+    return success;
 }
 
 void WeatherManager::parseWeatherJson(const char* json_data) {

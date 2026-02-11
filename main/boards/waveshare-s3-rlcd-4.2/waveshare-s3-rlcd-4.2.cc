@@ -61,6 +61,7 @@ private:
     void InitializeButtons() { 
         // BOOT 按钮（GPIO0）- 主要交互按键
         boot_button_.OnClick([this]() {
+            if (display_) display_->NotifyUserActivity();  // 记录用户活动
             auto& app = Application::GetInstance();
             if (app.GetDeviceState() == kDeviceStateStarting) {
                 EnterWifiConfigMode();
@@ -71,20 +72,21 @@ private:
 
         // USER 按钮（GPIO18）- 辅助功能按键
         user_button_.OnClick([this]() {
-            // 单击：切换屏幕显示模式（预留给多布局切换功能）
-            // TODO: 实现多屏幕模式切换
+            if (display_) display_->NotifyUserActivity();  // 记录用户活动
             if (display_) {
-                display_->SetChatMessage("system", "屏幕模式切换\n功能开发中...");
+                display_->CycleDisplayMode();
             }
-            ESP_LOGI(TAG, "USER 按钮单击：屏幕模式切换（待实现）");
+            ESP_LOGI(TAG, "USER 按钮单击：切换天气页/音乐页");
         });
 
         user_button_.OnDoubleClick([this]() {
+            if (display_) display_->NotifyUserActivity();  // 记录用户活动
             // 双击：刷新所有数据（天气、传感器、时间）
             RefreshAllData();
         });
 
         user_button_.OnLongPress([this]() {
+            if (display_) display_->NotifyUserActivity();  // 记录用户活动
             // 长按：显示系统信息
             ShowSystemInfo();
         });
@@ -281,6 +283,52 @@ private:
             EnterWifiConfigMode();
             return true;
         });
+
+        // ===== 屏幕切换工具（语音可调用）=====
+        mcp_server.AddTool(
+            "self.disp.switch",
+            "Switch display page between weather and music.\n"
+            "Use when user says: '切到音乐页', '打开天气页', '切换屏幕', 'switch screen', 'show music page'.\n"
+            "Args:\n"
+            "  `mode`: 'toggle' | 'music' | 'weather' (default: 'toggle')",
+            PropertyList({
+                Property("mode", kPropertyTypeString, std::string("toggle"))
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                if (!display_) {
+                    return std::string("显示器未初始化，暂时无法切换页面");
+                }
+
+                auto mode = properties["mode"].value<std::string>();
+                bool is_music = display_->IsMusicMode();
+                bool need_switch = false;
+
+                // 统一小写判断，避免 LLM 传参大小写不一致导致失效
+                for (auto& ch : mode) {
+                    if (ch >= 'A' && ch <= 'Z') {
+                        ch = static_cast<char>(ch - 'A' + 'a');
+                    }
+                }
+
+                if (mode == "toggle") {
+                    need_switch = true;
+                } else if (mode == "music") {
+                    need_switch = !is_music;
+                } else if (mode == "weather") {
+                    need_switch = is_music;
+                } else {
+                    return std::string("参数 mode 无效，请使用 toggle/music/weather");
+                }
+
+                if (need_switch) {
+                    display_->NotifyUserActivity();
+                    display_->CycleDisplayMode();
+                    is_music = display_->IsMusicMode();
+                }
+
+                return is_music ? std::string("已切换到音乐页") : std::string("已切换到天气页");
+            }
+        );
 
         // ===== 备忘录工具（多条列表模式）=====
         // NVS key "items" 存储 JSON 数组: [{"t":"15:00","c":"开会"}, ...]

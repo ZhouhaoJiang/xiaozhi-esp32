@@ -18,9 +18,11 @@ public:
     static WeatherManager& getInstance();
     
     // 更新天气数据（包含定位+天气请求，耗时较长，应在后台任务中调用）
-    void update();
+    // 返回 true 表示更新成功，false 表示失败（网络错误等）
+    bool update();
     
     // 获取最新天气数据（线程安全，直接读取缓存）
+    // 即使网络断开，也能返回上次成功获取的数据
     WeatherData getLatestData() { return latest_data_; }
 
     // 设置 API 密钥和主机（从配置中读取）

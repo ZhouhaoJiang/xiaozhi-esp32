@@ -10,6 +10,7 @@
 #include <mutex>
 #include <deque>
 #include <memory>
+#include <atomic>
 
 #include "protocol.h"
 #include "ota.h"
@@ -111,15 +112,12 @@ public:
     void SetAecMode(AecMode mode);
     AecMode GetAecMode() const { return aec_mode_; }
     void PlaySound(const std::string_view& sound);
+    bool PlayMusicFromUrl(const std::string& url, const std::string& title, const std::string& artist,
+                          const std::string& lyric, const std::string& lyric_url = "");
+    void StopMusicPlayback(bool clear_lyric = true);
+    bool IsMusicPlaying() const { return music_playing_.load(); }
+    void UpdateMusicLyric(const std::string& lyric);
     AudioService& GetAudioService() { return audio_service_; }
-    
-    /**
-     * Trigger AI to speak text proactively (e.g., for memo reminders)
-     * This method will interrupt current state if necessary (speaking/listening)
-     * Simulates wake word detection and sends text as STT result
-     * Returns true if message was queued successfully (actual execution is async)
-     */
-    bool TriggerAiReminder(const std::string& reminder_text);
     
     /**
      * Reset protocol resources (thread-safe)
@@ -148,6 +146,11 @@ private:
     bool aborted_ = false;
     bool assets_version_checked_ = false;
     bool play_popup_on_listening_ = false;  // Flag to play popup sound after state changes to listening
+    std::atomic<bool> music_playing_{false};
+    std::atomic<bool> stop_music_playback_{false};
+    TaskHandle_t music_playback_task_handle_ = nullptr;
+    std::string current_music_title_;
+    std::mutex music_playback_mutex_;
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 
@@ -173,6 +176,7 @@ private:
     void InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
     void SetListeningMode(ListeningMode mode);
+    void MusicPlaybackTask(std::string url, std::string title, std::string artist, std::string lyric_url = "");
     
     // State change handler called by state machine
     void OnStateChanged(DeviceState old_state, DeviceState new_state);

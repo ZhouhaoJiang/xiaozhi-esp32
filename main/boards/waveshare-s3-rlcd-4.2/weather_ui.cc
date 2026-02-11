@@ -36,8 +36,18 @@ static const char *TAG = "WeatherUI";
 void CustomLcdDisplay::SetupWeatherUI() {
     DisplayLockGuard lock(this);
     
-    lv_obj_t *screen = lv_screen_active();
-    lv_obj_set_style_bg_color(screen, lv_color_black(), 0);
+    lv_obj_t *root = lv_screen_active();
+    lv_obj_set_style_bg_color(root, lv_color_black(), 0);
+    weather_page_ = lv_obj_create(root);
+    lv_obj_set_size(weather_page_, 400, 300);
+    lv_obj_set_pos(weather_page_, 0, 0);
+    lv_obj_set_style_bg_opa(weather_page_, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(weather_page_, 0, 0);
+    lv_obj_set_style_pad_all(weather_page_, 0, 0);
+    lv_obj_set_style_radius(weather_page_, 0, 0);
+    lv_obj_remove_flag(weather_page_, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *screen = weather_page_;
 
     const lv_font_t *font_small  = &alibaba_puhui_16;
     const lv_font_t *font_normal = &alibaba_puhui_24;
@@ -306,8 +316,24 @@ void CustomLcdDisplay::SetupWeatherUI() {
     lv_obj_add_flag(mute_label_, LV_OBJ_FLAG_HIDDEN);
     
     low_battery_popup_ = lv_obj_create(screen);
+    lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_size(low_battery_popup_, 320, 42);
+    lv_obj_align(low_battery_popup_, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_bg_color(low_battery_popup_, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(low_battery_popup_, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(low_battery_popup_, 2, 0);
+    lv_obj_set_style_border_color(low_battery_popup_, lv_color_black(), 0);
+    lv_obj_set_style_radius(low_battery_popup_, 12, 0);
+    lv_obj_set_style_pad_all(low_battery_popup_, 6, 0);
+    lv_obj_remove_flag(low_battery_popup_, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
     low_battery_label_ = lv_label_create(low_battery_popup_);
+    lv_obj_set_style_text_font(low_battery_label_, font_ai, 0);
+    lv_obj_set_style_text_color(low_battery_label_, lv_color_black(), 0);
+    lv_obj_set_style_text_align(low_battery_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(low_battery_label_, 300);
+    lv_obj_center(low_battery_label_);
+    lv_label_set_text(low_battery_label_, "电量低，请尽快充电");
     
     // emoji 相关（SetEmotion 基类方法会用到）
     emoji_label_ = lv_label_create(screen);

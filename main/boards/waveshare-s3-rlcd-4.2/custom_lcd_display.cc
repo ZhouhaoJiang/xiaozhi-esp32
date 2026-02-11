@@ -10,6 +10,7 @@
 // 其他功能拆分到独立文件：
 //   rlcd_driver.cc        - RLCD 硬件驱动
 //   weather_ui.cc          - 天气站 UI 布局
+//   music_ui.cc            - 音乐页 UI 布局
 //   data_update_task.cc    - 后台数据更新任务
 
 #include <vector>
@@ -92,9 +93,11 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
         return;
     }
 
-    // 4. 创建天气站 UI（实现在 weather_ui.cc）
-    ESP_LOGI(TAG, "创建天气站 + AI 混合 UI");
+    // 4. 创建天气页 + 音乐页 UI（实现在 weather_ui.cc / music_ui.cc）
+    ESP_LOGI(TAG, "创建天气页 + 音乐页 UI");
     SetupWeatherUI();
+    SetupMusicUI();
+    ApplyDisplayMode();
 
     // 5. 启动时从 NVS 加载上次保存的备忘录
     LoadMemoFromNvs();
@@ -177,7 +180,7 @@ void CustomLcdDisplay::RefreshMemoDisplay() {
 
 void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
     DisplayLockGuard lock(this);
-    if (chat_status_label_ == nullptr) return;
+    if (chat_status_label_ == nullptr && music_chat_status_label_ == nullptr) return;
     if (!content || strlen(content) == 0) return;
 
     // 停止可能正在运行的滚动动画（系统信息或之前的 AI 滚动）
@@ -193,10 +196,12 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
     // 先恢复居中对齐（正常模式），计算内容高度
     lv_obj_align(chat_status_label_, LV_ALIGN_LEFT_MID, 64 + 20, 0);
     
-    // 检查内容是否超出可见区域高度
+    // 检查内容是否超出父容器（chat_inner）的可见高度
     lv_obj_update_layout(chat_status_label_);
     int label_h = lv_obj_get_height(chat_status_label_);
-    int visible_h = 122 - 14;  // chat_inner 可见高度 = bot_row_h - 内边框间距
+    // 从父容器动态获取高度，不硬编码（父容器是 chat_inner）
+    lv_obj_t *parent = lv_obj_get_parent(chat_status_label_);
+    int visible_h = parent ? lv_obj_get_content_height(parent) : 108;
     
     if (label_h > visible_h) {
         // 超长内容：切换到 TOP_LEFT 绝对定位后启用滚动
@@ -218,6 +223,21 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
         lv_anim_start(&a);
         
         ESP_LOGI("CustomLcdDisplay", "AI 回答过长（%dpx > %dpx），启用慢速滚动", label_h, visible_h);
+    }
+
+    // 音乐页同步显示 AI 文案（过滤掉 MCP 工具调用原文，那些是内部指令不适合展示）
+    if (music_chat_status_label_) {
+        std::string msg(content);
+        // 过滤所有 MCP 工具调用原文（格式：% self.xxx 或 &self.xxx）
+        bool is_mcp_call = (msg.find("self.tool.") != std::string::npos ||
+                            msg.find("self.disp.") != std::string::npos ||
+                            msg.find("self.music.") != std::string::npos ||
+                            msg.find("&self.") != std::string::npos ||
+                            msg.find("% self.") != std::string::npos);
+        if (!is_mcp_call) {
+            lv_label_set_long_mode(music_chat_status_label_, LV_LABEL_LONG_WRAP);
+            lv_label_set_text(music_chat_status_label_, content);
+        }
     }
 }
 
@@ -257,18 +277,33 @@ void CustomLcdDisplay::SetEmotion(const char* emotion) {
     if (emotion_label_) {
         lv_label_set_text(emotion_label_, text);
     }
+    if (music_emotion_label_) {
+        lv_label_set_text(music_emotion_label_, text);
+    }
     
-    // 2. 尝试加载小智自带的 emoji 图片
-    if (emotion_img_ && current_theme_) {
+    // 2. 尝试加载小智自带的 emoji 图片（天气页 + 音乐页同步更新）
+    if (current_theme_) {
         auto emoji_collection = static_cast<LvglTheme*>(current_theme_)->emoji_collection();
         auto image = emoji_collection ? emoji_collection->GetEmojiImage(emotion) : nullptr;
-        if (image && !image->IsGif()) {
-            // 有对应的静态图片，显示出来（GIF 在单色屏上意义不大，跳过）
-            lv_image_set_src(emotion_img_, image->image_dsc());
-            lv_obj_remove_flag(emotion_img_, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            // 没有图片，隐藏图片控件，只显示文字
-            lv_obj_add_flag(emotion_img_, LV_OBJ_FLAG_HIDDEN);
+        bool has_image = (image && !image->IsGif());
+        
+        // 天气页 emoji
+        if (emotion_img_) {
+            if (has_image) {
+                lv_image_set_src(emotion_img_, image->image_dsc());
+                lv_obj_remove_flag(emotion_img_, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(emotion_img_, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+        // 音乐页 emoji（同步显示相同的表情图片）
+        if (music_emotion_img_) {
+            if (has_image) {
+                lv_image_set_src(music_emotion_img_, image->image_dsc());
+                lv_obj_remove_flag(music_emotion_img_, LV_OBJ_FLAG_HIDDEN);
+            } else {
+                lv_obj_add_flag(music_emotion_img_, LV_OBJ_FLAG_HIDDEN);
+            }
         }
     }
 }
@@ -276,6 +311,7 @@ void CustomLcdDisplay::SetEmotion(const char* emotion) {
 void CustomLcdDisplay::ClearChatMessages() {
     DisplayLockGuard lock(this);
     if (chat_status_label_) lv_label_set_text(chat_status_label_, "");
+    if (music_chat_status_label_) lv_label_set_text(music_chat_status_label_, "");
     // 表情不清除，保持常驻
 }
 
@@ -297,4 +333,128 @@ void CustomLcdDisplay::SetTheme(Theme* theme) {
     // 但需要保存 theme 指针，SetEmotion 需要用它来加载 emoji 图片
     current_theme_ = theme;
     ESP_LOGI(TAG, "RLCD 单色屏，跳过主题切换（已保存 theme 指针）");
+}
+
+void CustomLcdDisplay::ApplyDisplayMode() {
+    if (weather_page_ == nullptr || music_page_ == nullptr) {
+        return;
+    }
+    if (display_mode_ == MODE_WEATHER) {
+        lv_obj_remove_flag(weather_page_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(music_page_, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(weather_page_, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(music_page_, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+void CustomLcdDisplay::CycleDisplayMode() {
+    DisplayLockGuard lock(this);
+    display_mode_ = (display_mode_ == MODE_WEATHER) ? MODE_MUSIC : MODE_WEATHER;
+    ApplyDisplayMode();
+    ESP_LOGI(TAG, "页面切换: %s", display_mode_ == MODE_WEATHER ? "天气页" : "音乐页");
+}
+
+void CustomLcdDisplay::SetMusicInfo(const char* title, const char* artist) {
+    DisplayLockGuard lock(this);
+    if (music_title_label_ == nullptr || music_artist_label_ == nullptr) {
+        return;
+    }
+    lv_label_set_text(music_title_label_, (title && strlen(title) > 0) ? title : "未知歌曲");
+    lv_label_set_text(music_artist_label_, (artist && strlen(artist) > 0) ? artist : "未知歌手");
+}
+
+void CustomLcdDisplay::SetMusicLyric(const char* lyric) {
+    DisplayLockGuard lock(this);
+    if (music_lyric_label_ == nullptr) {
+        return;
+    }
+
+    // 歌词格式："上一句\n当前句\n下一句"（由 application.cc 拼接）
+    // 如果没有 \n 分隔符，说明是单行文本（如错误提示），直接显示在当前行
+    std::string text(lyric ? lyric : "");
+    std::string prev_line, curr_line, next_line;
+
+    size_t first_nl = text.find('\n');
+    if (first_nl != std::string::npos) {
+        prev_line = text.substr(0, first_nl);
+        size_t second_nl = text.find('\n', first_nl + 1);
+        if (second_nl != std::string::npos) {
+            curr_line = text.substr(first_nl + 1, second_nl - first_nl - 1);
+            next_line = text.substr(second_nl + 1);
+        } else {
+            curr_line = text.substr(first_nl + 1);
+        }
+    } else {
+        // 单行文本（错误提示等），只显示在当前行
+        curr_line = text;
+    }
+
+    // 更新三个 label
+    if (music_lyric_prev_label_) {
+        lv_label_set_text(music_lyric_prev_label_, prev_line.c_str());
+    }
+    lv_label_set_text(music_lyric_label_, curr_line.c_str());
+    if (music_lyric_next_label_) {
+        lv_label_set_text(music_lyric_next_label_, next_line.c_str());
+    }
+}
+
+void CustomLcdDisplay::SetMusicProgress(uint32_t current_ms, uint32_t total_ms) {
+    DisplayLockGuard lock(this);
+    if (music_progress_bar_ == nullptr || music_progress_label_ == nullptr) {
+        return;
+    }
+
+    if (total_ms > 0) {
+        // 有总时长（来自歌词）：正常显示进度条和 "当前 / 总时长"
+        if (current_ms > total_ms) {
+            current_ms = total_ms;
+        }
+        lv_bar_set_range(music_progress_bar_, 0, static_cast<int32_t>(total_ms));
+        lv_bar_set_value(music_progress_bar_, static_cast<int32_t>(current_ms), LV_ANIM_OFF);
+
+        char progress_text[32];
+        snprintf(progress_text, sizeof(progress_text), "%02lu:%02lu / %02lu:%02lu",
+                 static_cast<unsigned long>(current_ms / 60000),
+                 static_cast<unsigned long>((current_ms / 1000) % 60),
+                 static_cast<unsigned long>(total_ms / 60000),
+                 static_cast<unsigned long>((total_ms / 1000) % 60));
+        lv_label_set_text(music_progress_label_, progress_text);
+    } else {
+        // 无总时长（没有歌词）：进度条不动，只显示已播放时间
+        char progress_text[32];
+        snprintf(progress_text, sizeof(progress_text), "%02lu:%02lu",
+                 static_cast<unsigned long>(current_ms / 60000),
+                 static_cast<unsigned long>((current_ms / 1000) % 60));
+        lv_label_set_text(music_progress_label_, progress_text);
+    }
+}
+
+void CustomLcdDisplay::SwitchToMusicPage() {
+    DisplayLockGuard lock(this);
+    if (display_mode_ != MODE_MUSIC) {
+        display_mode_ = MODE_MUSIC;
+        ApplyDisplayMode();
+        ESP_LOGI(TAG, "自动切换到音乐页");
+    }
+}
+
+void CustomLcdDisplay::SwitchToWeatherPage() {
+    DisplayLockGuard lock(this);
+    if (display_mode_ != MODE_WEATHER) {
+        display_mode_ = MODE_WEATHER;
+        ApplyDisplayMode();
+        ESP_LOGI(TAG, "自动切换到天气页");
+    }
+}
+
+// ===== 省电模式 =====
+
+void CustomLcdDisplay::NotifyUserActivity() {
+    last_activity_ms_ = xTaskGetTickCount() * portTICK_PERIOD_MS;
+    if (power_saving_) {
+        power_saving_ = false;
+        ESP_LOGI(TAG, "用户活动检测到，退出省电模式");
+    }
 }

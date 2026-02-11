@@ -43,6 +43,13 @@ public:
     virtual void SetupUI() { 
         setup_ui_called_ = true;
     }
+    // 音乐页面能力（默认空实现，具体屏幕按需重写）
+    virtual void SetMusicInfo(const char* title, const char* artist);
+    virtual void SetMusicLyric(const char* lyric);
+    virtual void SetMusicProgress(uint32_t current_ms, uint32_t total_ms);
+    // 页面切换能力（默认空实现，支持多页面的屏幕可重写）
+    virtual void SwitchToMusicPage();
+    virtual void SwitchToWeatherPage();
 
     inline int width() const { return width_; }
     inline int height() const { return height_; }

@@ -11,13 +11,29 @@
 #include "settings.h"
 
 #include <cstring>
+#include <algorithm>
 #include <esp_log.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
 #include <font_awesome.h>
+#include <esp_heap_caps.h>
+#include "esp_audio_dec_default.h"
+#include "esp_audio_simple_dec.h"
+#include "esp_audio_simple_dec_default.h"
+#include "esp_ae_rate_cvt.h"
 
 #define TAG "Application"
+
+namespace {
+struct MusicPlaybackTaskArgs {
+    Application* app = nullptr;
+    std::string url;
+    std::string title;
+    std::string artist;
+    std::string lyric_url;
+};
+}  // namespace
 
 
 Application::Application() {
@@ -685,6 +701,11 @@ void Application::HandleToggleChatEvent() {
         return;
     }
 
+    // 用户开始交互时优先打断本地音乐播放，确保语音链路可立即接管音频设备。
+    if (IsMusicPlaying()) {
+        StopMusicPlayback();
+    }
+
     if (!protocol_) {
         ESP_LOGE(TAG, "Protocol not initialized");
         return;
@@ -735,6 +756,11 @@ void Application::HandleStartListeningEvent() {
         return;
     }
 
+    // 用户按下开始监听时，如果正在播歌，先立即停止。
+    if (IsMusicPlaying()) {
+        StopMusicPlayback();
+    }
+
     if (!protocol_) {
         ESP_LOGE(TAG, "Protocol not initialized");
         return;
@@ -772,6 +798,10 @@ void Application::HandleStopListeningEvent() {
 }
 
 void Application::HandleWakeWordDetectedEvent() {
+    if (IsMusicPlaying()) {
+        StopMusicPlayback();
+    }
+
     if (!protocol_) {
         return;
     }
@@ -843,9 +873,14 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
-            display->SetStatus(Lang::Strings::STANDBY);
-            display->ClearChatMessages();  // Clear messages first
-            display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            // 本地音乐播放期间保持歌词/曲目信息，避免被空闲态重绘清掉。
+            if (IsMusicPlaying()) {
+                display->SetStatus("音乐播放");
+            } else {
+                display->SetStatus(Lang::Strings::STANDBY);
+                display->ClearChatMessages();  // Clear messages first
+                display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+            }
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
@@ -921,6 +956,8 @@ void Application::SetListeningMode(ListeningMode mode) {
 
 void Application::Reboot() {
     ESP_LOGI(TAG, "Rebooting...");
+    StopMusicPlayback();
+
     // Disconnect the audio channel
     if (protocol_ && protocol_->IsAudioChannelOpened()) {
         protocol_->CloseAudioChannel();
@@ -1043,72 +1080,6 @@ void Application::SendMcpMessage(const std::string& payload) {
     });
 }
 
-bool Application::TriggerAiReminder(const std::string& reminder_text) {
-    // 检查协议是否初始化（不检查状态，允许打断）
-    if (!protocol_) {
-        ESP_LOGW(TAG, "无法触发 AI 提醒：协议未初始化");
-        return false;
-    }
-    
-    auto state = GetDeviceState();
-    ESP_LOGI(TAG, "触发 AI 提醒 (当前状态=%d): %s", state, reminder_text.c_str());
-    
-    // 通过主任务 Schedule 执行，确保线程安全
-    Schedule([this, text = reminder_text]() {
-        auto current_state = GetDeviceState();
-        
-        // 如果正在说话，先打断（发送 abort 消息）
-        if (current_state == kDeviceStateSpeaking) {
-            ESP_LOGI(TAG, "AI 提醒：打断当前说话状态");
-            AbortSpeaking(kAbortReasonNone);
-            // AbortSpeaking 会发送 abort 消息给服务器，稍等一下让服务器处理
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        
-        // 如果正在聆听，先关闭音频通道（停止录音）
-        if (current_state == kDeviceStateListening) {
-            ESP_LOGI(TAG, "AI 提醒：停止当前聆听状态");
-            protocol_->CloseAudioChannel(false);  // 不发送 goodbye，直接关闭
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        
-        // 如果音频通道未打开（或刚被关闭），重新打开
-        if (!protocol_->IsAudioChannelOpened()) {
-            SetDeviceState(kDeviceStateConnecting);
-            
-            // 等待连接建立后继续（再次拷贝 text）
-            std::string text_copy = text;
-            Schedule([this, text_copy]() {
-                if (!protocol_->OpenAudioChannel()) {
-                    ESP_LOGE(TAG, "AI 提醒：音频通道打开失败");
-                    // 打开失败，至少确保回到空闲状态
-                    SetDeviceState(kDeviceStateIdle);
-                    return;
-                }
-                
-                // 连接成功后，模拟唤醒词检测并发送文本
-                // 根据 websocket.md 文档：
-                // {"session_id": "xxx", "type": "listen", "state": "detect", "text": "备忘提醒"}
-                protocol_->SendWakeWordDetected(text_copy);
-                
-                // 立即启动聆听模式，让服务器处理文本并返回 TTS
-                protocol_->SendStartListening(kListeningModeAutoStop);
-                SetDeviceState(kDeviceStateListening);
-                
-                ESP_LOGI(TAG, "AI 提醒已发送，等待服务器回复");
-            });
-        } else {
-            // 音频通道已打开，直接发送（可能刚打断完，通道还在）
-            protocol_->SendWakeWordDetected(text);
-            protocol_->SendStartListening(kListeningModeAutoStop);
-            SetDeviceState(kDeviceStateListening);
-            ESP_LOGI(TAG, "AI 提醒已发送（复用已有连接）");
-        }
-    });
-    
-    return true;
-}
-
 void Application::SetAecMode(AecMode mode) {
     aec_mode_ = mode;
     Schedule([this]() {
@@ -1140,7 +1111,533 @@ void Application::PlaySound(const std::string_view& sound) {
     audio_service_.PlaySound(sound);
 }
 
+bool Application::PlayMusicFromUrl(const std::string& url, const std::string& title, const std::string& artist,
+                                   const std::string& lyric, const std::string& lyric_url) {
+    if (url.empty()) {
+        return false;
+    }
+
+    // 先停止旧播放，避免多个任务同时争用音频输出。
+    StopMusicPlayback(false);
+
+    // 音乐播放前先退出当前语音会话，避免服务端音频与本地音乐混播。
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        AbortSpeaking(kAbortReasonNone);
+    }
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        protocol_->CloseAudioChannel();
+    }
+    SetDeviceState(kDeviceStateIdle);
+    audio_service_.ResetDecoder();
+    audio_service_.SetExternalPlaybackActive(true);
+
+    {
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        stop_music_playback_.store(false);
+        music_playing_.store(true);
+        current_music_title_ = title;
+    }
+
+    auto display_title = title.empty() ? "未知歌曲" : title;
+    auto display_artist = artist.empty() ? "未知歌手" : artist;
+    Schedule([display_title, display_artist]() {
+        auto display = Board::GetInstance().GetDisplay();
+        // 触发音乐播放时，优先切到音乐页，避免歌词继续显示在首页 AI 卡片
+        display->SwitchToMusicPage();
+        display->SetStatus("音乐播放");
+        display->SetMusicInfo(display_title.c_str(), display_artist.c_str());
+        display->SetMusicProgress(0, 1);
+        display->SetMusicLyric("");
+    });
+    if (!lyric.empty()) {
+        UpdateMusicLyric(lyric);
+    }
+
+    auto* args = new MusicPlaybackTaskArgs();
+    args->app = this;
+    args->url = url;
+    args->title = display_title;
+    args->artist = display_artist;
+    // 优先使用直接歌词文本；如果为空则把 lyric_url 传给播放任务，让它自行拉取
+    args->lyric_url = lyric.empty() ? lyric_url : "";
+
+    BaseType_t created = xTaskCreate([](void* arg) {
+        std::unique_ptr<MusicPlaybackTaskArgs> task_args(static_cast<MusicPlaybackTaskArgs*>(arg));
+        task_args->app->MusicPlaybackTask(std::move(task_args->url), std::move(task_args->title),
+                                          std::move(task_args->artist), std::move(task_args->lyric_url));
+        vTaskDelete(nullptr);
+    }, "music_playback", 12288, args, 3, &music_playback_task_handle_);
+
+    if (created != pdPASS) {
+        delete args;
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        music_playing_.store(false);
+        music_playback_task_handle_ = nullptr;
+        current_music_title_.clear();
+        return false;
+    }
+
+    return true;
+}
+
+void Application::MusicPlaybackTask(std::string url, std::string title, std::string artist, std::string lyric_url) {
+    auto& board = Board::GetInstance();
+    auto display = board.GetDisplay();
+    auto codec = board.GetAudioCodec();
+    auto network = board.GetNetwork();
+    ESP_LOGI(TAG, "开始播放音乐: %s - %s", title.c_str(), artist.c_str());
+
+    // LRC 歌词结构：(时间戳毫秒, 纯文本)
+    struct LyricLine {
+        uint32_t time_ms;
+        std::string text;
+    };
+    std::vector<LyricLine> lyrics;
+    size_t current_lyric_idx = 0;
+    size_t last_displayed_idx = SIZE_MAX;  // 避免重复刷新
+    uint32_t lyric_total_ms = 0;
+
+    // 如果有歌词 URL，拉取并解析 LRC 格式
+    if (!lyric_url.empty()) {
+        ESP_LOGI(TAG, "正在拉取歌词: %s", lyric_url.c_str());
+        auto lyric_http = network->CreateHttp(4);  // 用不同的 connect_id，避免和音乐流(3)的 TLS 连接冲突
+        lyric_http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+        if (lyric_http->Open("GET", lyric_url)) {
+            if (lyric_http->GetStatusCode() == 200) {
+                std::string lyric_text = lyric_http->ReadAll();
+                if (!lyric_text.empty()) {
+                    ESP_LOGI(TAG, "歌词拉取成功，长度=%d bytes", (int)lyric_text.size());
+
+                    // 解析 LRC 歌词：逐行提取 [mm:ss.xx] 时间戳和纯文本
+                    size_t pos = 0;
+                    while (pos < lyric_text.size()) {
+                        // 找到行尾
+                        size_t line_end = lyric_text.find('\n', pos);
+                        if (line_end == std::string::npos) line_end = lyric_text.size();
+                        std::string line = lyric_text.substr(pos, line_end - pos);
+                        pos = line_end + 1;
+
+                        // 去掉行尾 \r
+                        if (!line.empty() && line.back() == '\r') line.pop_back();
+                        if (line.empty()) continue;
+
+                        // 提取所有时间标签 [mm:ss.xx] 或 [mm:ss.xxx]
+                        std::string pure_text;
+                        std::vector<uint32_t> timestamps;
+                        size_t i = 0;
+                        while (i < line.size() && line[i] == '[') {
+                            size_t close = line.find(']', i);
+                            if (close == std::string::npos) break;
+                            std::string tag = line.substr(i + 1, close - i - 1);
+                            i = close + 1;
+
+                            // 尝试解析时间 mm:ss.xx
+                            int mm = 0, ss = 0, ms = 0;
+                            if (sscanf(tag.c_str(), "%d:%d.%d", &mm, &ss, &ms) >= 2) {
+                                // 处理毫秒位数：.27 → 270ms, .270 → 270ms, .5 → 500ms
+                                if (ms < 10 && tag.find('.') != std::string::npos) {
+                                    size_t dot = tag.find('.');
+                                    size_t ms_digits = tag.size() - dot - 1;
+                                    if (ms_digits == 1) ms *= 100;
+                                    else if (ms_digits == 2) ms *= 10;
+                                }
+                                timestamps.push_back(mm * 60000 + ss * 1000 + ms);
+                            }
+                            // 非时间标签（如 [ti:标题]）直接跳过
+                        }
+                        pure_text = line.substr(i);
+
+                        // 跳过空歌词和元信息行
+                        if (pure_text.empty()) continue;
+
+                        // 每个时间戳对应同一句歌词
+                        for (uint32_t ts : timestamps) {
+                            lyrics.push_back({ts, pure_text});
+                        }
+                    }
+
+                    // 按时间排序
+                    std::sort(lyrics.begin(), lyrics.end(),
+                              [](const LyricLine& a, const LyricLine& b) { return a.time_ms < b.time_ms; });
+                    if (!lyrics.empty()) {
+                        lyric_total_ms = std::max<uint32_t>(lyrics.back().time_ms, 1);
+                    }
+
+                    ESP_LOGI(TAG, "LRC 歌词解析完成，共 %d 行有效歌词", (int)lyrics.size());
+                } else {
+                    ESP_LOGW(TAG, "歌词内容为空");
+                }
+            } else {
+                ESP_LOGW(TAG, "歌词拉取失败，HTTP 状态码: %d", lyric_http->GetStatusCode());
+            }
+            lyric_http->Close();
+        } else {
+            ESP_LOGW(TAG, "歌词拉取失败：无法连接到歌词服务");
+        }
+    }
+    constexpr int kReadBufSize = 2048;
+    int out_buf_size = 8192;
+    bool decoder_registered = false;
+    bool playback_finished = false;
+    bool playback_failed = false;
+    bool notify_failed = false;
+    esp_audio_err_t ret = ESP_AUDIO_ERR_OK;
+    esp_audio_simple_dec_handle_t decoder = nullptr;
+    esp_ae_rate_cvt_handle_t music_resampler = nullptr;
+    uint8_t* in_buf = nullptr;
+    uint8_t* out_buf = nullptr;
+    bool info_ready = false;
+    int stream_sample_rate = codec->output_sample_rate();
+    int stream_channels = codec->output_channels();
+    int zero_read_count = 0;
+    constexpr int kMaxZeroReads = 30;  // 约 3 秒，避免网络抖动导致误判 EOF。
+    size_t total_read_bytes = 0;
+    size_t total_output_samples = 0;
+
+    auto http = network->CreateHttp(3);
+    do {
+        http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+        if (!http->Open("GET", url)) {
+            ESP_LOGE(TAG, "播放音乐失败：无法打开 URL: %s", url.c_str());
+            playback_failed = true;
+            Schedule([display]() {
+                // 音乐页可见时，必须把失败信息写到歌词区，避免用户看不到弹窗。
+                display->SetMusicLyric("播放失败：链接无效或网络异常");
+                display->SetMusicProgress(0, 1);
+                display->ShowNotification("音乐播放失败：网络连接异常");
+            });
+            notify_failed = true;
+            break;
+        }
+        if (http->GetStatusCode() != 200) {
+            ESP_LOGE(TAG, "播放音乐失败：HTTP 状态码 %d", http->GetStatusCode());
+            playback_failed = true;
+            Schedule([display]() {
+                // 资源不可用时，同步更新音乐页提示，避免只在通知区显示。
+                display->SetMusicLyric("播放失败：资源不可用");
+                display->SetMusicProgress(0, 1);
+                display->ShowNotification("音乐播放失败：资源不可用");
+            });
+            notify_failed = true;
+            break;
+        }
+
+        ret = esp_audio_dec_register_default();
+        if (ret != ESP_AUDIO_ERR_OK) {
+            ESP_LOGE(TAG, "注册默认解码器失败: %d", ret);
+            playback_failed = true;
+            break;
+        }
+        ret = esp_audio_simple_dec_register_default();
+        if (ret != ESP_AUDIO_ERR_OK) {
+            ESP_LOGE(TAG, "注册简单解码器失败: %d", ret);
+            playback_failed = true;
+            break;
+        }
+        decoder_registered = true;
+
+        esp_audio_simple_dec_cfg_t dec_cfg = {
+            .dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_MP3,
+            .dec_cfg = nullptr,
+            .cfg_size = 0,
+            .use_frame_dec = false,
+        };
+        ret = esp_audio_simple_dec_open(&dec_cfg, &decoder);
+        if (ret != ESP_AUDIO_ERR_OK || decoder == nullptr) {
+            ESP_LOGE(TAG, "打开 MP3 解码器失败: %d", ret);
+            playback_failed = true;
+            break;
+        }
+
+        if (!codec->output_enabled()) {
+            codec->EnableOutput(true);
+        }
+
+        in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
+        out_buf = static_cast<uint8_t*>(heap_caps_malloc(out_buf_size, MALLOC_CAP_8BIT));
+        if (in_buf == nullptr || out_buf == nullptr) {
+            ESP_LOGE(TAG, "内存不足，无法播放音乐");
+            playback_failed = true;
+            break;
+        }
+
+        while (!stop_music_playback_.load()) {
+            int read_bytes = http->Read(reinterpret_cast<char*>(in_buf), kReadBufSize);
+            if (read_bytes < 0) {
+                ESP_LOGE(TAG, "读取音乐流失败: %d", read_bytes);
+                playback_failed = true;
+                break;
+            }
+            if (read_bytes == 0) {
+                zero_read_count++;
+                if (zero_read_count >= kMaxZeroReads) {
+                    ESP_LOGI(TAG, "音乐流读取结束（连续空读 %d 次）", zero_read_count);
+                    playback_finished = true;
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(100));
+                continue;
+            }
+            zero_read_count = 0;
+            total_read_bytes += static_cast<size_t>(read_bytes);
+
+            esp_audio_simple_dec_raw_t raw = {
+                .buffer = in_buf,
+                .len = static_cast<uint32_t>(read_bytes),
+                .eos = read_bytes < kReadBufSize,
+                .consumed = 0,
+                .frame_recover = ESP_AUDIO_SIMPLE_DEC_RECOVERY_NONE,
+            };
+
+            while (raw.len > 0 && !stop_music_playback_.load()) {
+                esp_audio_simple_dec_out_t out = {
+                    .buffer = out_buf,
+                    .len = static_cast<uint32_t>(out_buf_size),
+                    .needed_size = 0,
+                    .decoded_size = 0,
+                };
+                ret = esp_audio_simple_dec_process(decoder, &raw, &out);
+                if (ret == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+                    auto* new_buf = static_cast<uint8_t*>(heap_caps_realloc(out_buf, out.needed_size, MALLOC_CAP_8BIT));
+                    if (new_buf == nullptr) {
+                        ESP_LOGE(TAG, "扩容解码输出缓冲区失败");
+                        playback_failed = true;
+                        break;
+                    }
+                    out_buf = new_buf;
+                    out_buf_size = static_cast<int>(out.needed_size);
+                    continue;
+                }
+                if (ret != ESP_AUDIO_ERR_OK) {
+                    ESP_LOGW(TAG, "MP3 解码失败，ret=%d", ret);
+                    playback_failed = true;
+                    break;
+                }
+
+                if (!info_ready && out.decoded_size > 0) {
+                    esp_audio_simple_dec_info_t dec_info = {};
+                    if (esp_audio_simple_dec_get_info(decoder, &dec_info) == ESP_AUDIO_ERR_OK) {
+                        stream_sample_rate = static_cast<int>(dec_info.sample_rate);
+                        stream_channels = std::max(1, static_cast<int>(dec_info.channel));
+                        info_ready = true;
+                        ESP_LOGI(TAG, "MP3 解码信息: sample_rate=%d channel=%d", stream_sample_rate, stream_channels);
+                    }
+                }
+
+                if (out.decoded_size > 0) {
+                    std::vector<int16_t> pcm(out.decoded_size / sizeof(int16_t));
+                    memcpy(pcm.data(), out.buffer, out.decoded_size);
+
+                    // 先做声道转换，统一到 codec 输出声道数。
+                    if (stream_channels == 2 && codec->output_channels() == 1) {
+                        std::vector<int16_t> mono(pcm.size() / 2);
+                        for (size_t i = 0, j = 0; i < mono.size(); ++i, j += 2) {
+                            mono[i] = static_cast<int16_t>((static_cast<int32_t>(pcm[j]) + static_cast<int32_t>(pcm[j + 1])) / 2);
+                        }
+                        pcm = std::move(mono);
+                    } else if (stream_channels == 1 && codec->output_channels() == 2) {
+                        std::vector<int16_t> stereo(pcm.size() * 2);
+                        for (size_t i = 0; i < pcm.size(); ++i) {
+                            stereo[i * 2] = pcm[i];
+                            stereo[i * 2 + 1] = pcm[i];
+                        }
+                        pcm = std::move(stereo);
+                    }
+
+                    // 采样率不一致时重采样，避免“变速/变调”问题。
+                    if (stream_sample_rate != codec->output_sample_rate()) {
+                        if (music_resampler == nullptr) {
+                            esp_ae_rate_cvt_cfg_t cfg = {
+                                .src_rate = static_cast<uint32_t>(stream_sample_rate),
+                                .dest_rate = static_cast<uint32_t>(codec->output_sample_rate()),
+                                .channel = static_cast<uint8_t>(codec->output_channels()),
+                                .bits_per_sample = ESP_AUDIO_BIT16,
+                                .complexity = 2,
+                                .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED,
+                            };
+                            auto cvt_ret = esp_ae_rate_cvt_open(&cfg, &music_resampler);
+                            if (music_resampler == nullptr) {
+                                ESP_LOGE(TAG, "创建重采样器失败: %d", cvt_ret);
+                                playback_failed = true;
+                                break;
+                            }
+                        }
+                        uint32_t in_samples = static_cast<uint32_t>(pcm.size() / codec->output_channels());
+                        uint32_t out_samples = 0;
+                        esp_ae_rate_cvt_get_max_out_sample_num(music_resampler, in_samples, &out_samples);
+                        std::vector<int16_t> resampled(out_samples * codec->output_channels());
+                        uint32_t actual_out = out_samples;
+                        esp_ae_rate_cvt_process(
+                            music_resampler,
+                            reinterpret_cast<esp_ae_sample_t>(pcm.data()),
+                            in_samples,
+                            reinterpret_cast<esp_ae_sample_t>(resampled.data()),
+                            &actual_out);
+                        resampled.resize(actual_out * codec->output_channels());
+                        pcm = std::move(resampled);
+                    }
+
+                    if (!pcm.empty()) {
+                        total_output_samples += pcm.size();
+                        // 音乐播放绕过了 AudioService，需要手动保持功放开启。
+                        if (!codec->output_enabled()) {
+                            codec->EnableOutput(true);
+                        }
+                        codec->OutputData(pcm);
+
+                        // 计算当前播放位置（无论有没有歌词都需要）
+                        uint32_t current_ms = static_cast<uint32_t>(
+                            static_cast<uint64_t>(total_output_samples) * 1000
+                            / (codec->output_sample_rate() * codec->output_channels()));
+
+                        // 更新进度条（无论有没有歌词都要更新）
+                        // 没有歌词时 lyric_total_ms=0，用 0 让 SetMusicProgress 只显示播放时间
+                        display->SetMusicProgress(current_ms, lyric_total_ms);
+
+                        // 有歌词时同步歌词显示
+                        if (!lyrics.empty()) {
+                            // 向前搜索到当前时间对应的歌词行
+                            while (current_lyric_idx + 1 < lyrics.size()
+                                   && lyrics[current_lyric_idx + 1].time_ms <= current_ms) {
+                                current_lyric_idx++;
+                            }
+                            // 歌词行变化时更新屏幕显示（传三行：上一句\n当前句\n下一句）
+                            if (current_lyric_idx != last_displayed_idx) {
+                                last_displayed_idx = current_lyric_idx;
+                                std::string prev_line = (current_lyric_idx > 0) ? lyrics[current_lyric_idx - 1].text : "";
+                                std::string curr_line = lyrics[current_lyric_idx].text;
+                                std::string next_line = (current_lyric_idx + 1 < lyrics.size()) ? lyrics[current_lyric_idx + 1].text : "";
+                                UpdateMusicLyric(prev_line + "\n" + curr_line + "\n" + next_line);
+                            }
+                        }
+                    }
+                }
+
+                raw.len -= raw.consumed;
+                raw.buffer += raw.consumed;
+            }
+
+            if (playback_failed) {
+                break;
+            }
+        }
+    } while (false);
+
+    if (music_resampler != nullptr) {
+        esp_ae_rate_cvt_close(music_resampler);
+    }
+    if (in_buf != nullptr) {
+        heap_caps_free(in_buf);
+    }
+    if (out_buf != nullptr) {
+        heap_caps_free(out_buf);
+    }
+    if (decoder != nullptr) {
+        esp_audio_simple_dec_close(decoder);
+    }
+    if (decoder_registered) {
+        esp_audio_simple_dec_unregister_default();
+        esp_audio_dec_unregister_default();
+    }
+    if (http) {
+        http->Close();
+    }
+    audio_service_.SetExternalPlaybackActive(false);
+
+    bool stopped_by_user = stop_music_playback_.load();
+    {
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        music_playing_.store(false);
+        stop_music_playback_.store(false);
+        music_playback_task_handle_ = nullptr;
+        current_music_title_.clear();
+    }
+
+    if (stopped_by_user) {
+        ESP_LOGI(TAG, "音乐播放已被用户中断，累计读取=%u bytes, 输出=%u samples",
+                 static_cast<unsigned>(total_read_bytes),
+                 static_cast<unsigned>(total_output_samples));
+        return;
+    }
+    if (playback_failed && !notify_failed) {
+        ESP_LOGW(TAG, "音乐播放失败，累计读取=%u bytes, 输出=%u samples",
+                 static_cast<unsigned>(total_read_bytes),
+                 static_cast<unsigned>(total_output_samples));
+        Schedule([display]() {
+            display->SetMusicLyric("播放失败：请稍后重试");
+            display->SetMusicProgress(0, 1);
+            display->ShowNotification("音乐播放失败");
+            if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
+                display->SetStatus(Lang::Strings::STANDBY);
+            }
+        });
+        return;
+    }
+    if (playback_finished) {
+        ESP_LOGI(TAG, "音乐播放结束，累计读取=%u bytes, 输出=%u samples",
+                 static_cast<unsigned>(total_read_bytes),
+                 static_cast<unsigned>(total_output_samples));
+        Schedule([display]() {
+            // 清除歌词/聊天消息区域，恢复待命状态
+            display->SetMusicLyric("");
+            display->SetMusicProgress(0, 1);
+            display->ShowNotification("音乐播放结束");
+            // 自动返回天气首页，避免停留在空白音乐页
+            display->SwitchToWeatherPage();
+            if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
+                display->SetStatus(Lang::Strings::STANDBY);
+            }
+        });
+    }
+}
+
+void Application::StopMusicPlayback(bool clear_lyric) {
+    TaskHandle_t handle = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        handle = music_playback_task_handle_;
+        if (handle == nullptr) {
+            music_playing_.store(false);
+            current_music_title_.clear();
+        } else {
+            stop_music_playback_.store(true);
+        }
+    }
+
+    // 等待播放任务主动退出，避免直接删任务导致解码器/HTTP 资源泄漏。
+    while (handle != nullptr) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        handle = music_playback_task_handle_;
+    }
+
+    if (clear_lyric) {
+        Schedule([this]() {
+            auto display = Board::GetInstance().GetDisplay();
+            display->SetMusicLyric("");
+            display->SetMusicProgress(0, 1);
+            if (GetDeviceState() == kDeviceStateIdle) {
+                display->SetStatus(Lang::Strings::STANDBY);
+            }
+        });
+    }
+}
+
+void Application::UpdateMusicLyric(const std::string& lyric) {
+    if (!IsMusicPlaying()) {
+        return;
+    }
+    Schedule([lyric]() {
+        auto display = Board::GetInstance().GetDisplay();
+        // 歌词刷新时确保音乐页可见，避免内容落在首页 AI 区域
+        display->SwitchToMusicPage();
+        display->SetMusicLyric(lyric.c_str());
+    });
+}
+
 void Application::ResetProtocol() {
+    StopMusicPlayback();
+
     Schedule([this]() {
         // Close audio channel if opened
         if (protocol_ && protocol_->IsAudioChannelOpened()) {

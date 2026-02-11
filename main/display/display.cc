@@ -58,3 +58,24 @@ void Display::SetTheme(Theme* theme) {
 void Display::SetPowerSaveMode(bool on) {
     ESP_LOGW(TAG, "SetPowerSaveMode: %d", on);
 }
+
+void Display::SetMusicInfo(const char* title, const char* artist) {
+    ESP_LOGW(TAG, "SetMusicInfo: %s - %s", title ? title : "", artist ? artist : "");
+}
+
+void Display::SetMusicLyric(const char* lyric) {
+    SetChatMessage("assistant", lyric ? lyric : "");
+}
+
+void Display::SetMusicProgress(uint32_t current_ms, uint32_t total_ms) {
+    (void)current_ms;
+    (void)total_ms;
+}
+
+void Display::SwitchToMusicPage() {
+    // 默认设备只有单页面，不做任何操作
+}
+
+void Display::SwitchToWeatherPage() {
+    // 默认设备只有单页面，不做任何操作
+}
