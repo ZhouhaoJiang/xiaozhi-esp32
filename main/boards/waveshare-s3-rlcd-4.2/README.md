@@ -92,7 +92,7 @@
 #### 右上：日历 + 天气（130×128px）
 - 星期缩写（英文）
 - 日期数字
-- 天气状况 + 温度（来自和风天气 API）
+- 天气状况 + 温度（由 AI 通过 MCP 回写到设备）
 
 #### 左下：AI 对话区（252×122px）
 - 左侧：表情图标 + 状态文字
@@ -278,24 +278,26 @@ AI：  调用 self.system.info 获取数据
 
 ## 天气数据
 
-### 和风天气 API
-- **更新频率：** 每 10 分钟（仅在空闲状态）
-- **API 文档：** https://dev.qweather.com/
-- **流量消耗：** ~5KB / 次，~720KB / 天
+### MCP 回写模式（当前默认）
+- **数据来源：** AI 侧外部天气 MCP（例如高德天气工具等）
+- **设备侧行为：** 不主动请求和风 API，只接收 AI 调用 `self.weather.update` 写入的数据
+- **显示内容：** 城市名称、天气状况、实时温度
 
-### 配置方式
-1. 复制 `secret_config.h.example` → `secret_config.h`
-2. 填入你的 API Key：
-   ```cpp
-   #define WEATHER_API_KEY "your_key_here"
-   #define WEATHER_API_HOST "devapi.qweather.com"
-   ```
-3. 重新编译固件
+### 设备天气工具
 
-### 显示内容
-- 城市名称
-- 天气状况（晴、多云、雨等）
-- 实时温度
+#### `self.weather.update`
+**功能：** 将天气数据写入设备缓存并刷新天气区域显示  
+**参数：**
+- `city` (string) - 城市名（如 `苏州`）
+- `text` (string) - 天气文本（如 `晴`、`多云`）
+- `temp` (string) - 温度（不带单位，如 `5`、`-2`）
+- `update_time` (string, 可选) - 更新时间文本
+
+**典型流程：**
+1. 用户说“查苏州天气”
+2. AI 先调用外部天气 MCP 获取结果
+3. AI 再调用 `self.weather.update(city="苏州", text="雾", temp="5")`
+4. 屏幕天气区域同步更新
 
 ---
 
@@ -380,9 +382,9 @@ idf.py monitor
 3. 检查时区设置：`config.h` 中 `TIMEZONE_STRING`
 
 ### 天气不更新
-1. 检查 `secret_config.h` 中的 API Key 是否有效
-2. 查看串口日志：是否有 HTTP 请求错误
-3. 确认 API 免费额度未用完
+1. 确认 AI 已调用 `self.weather.update`
+2. 查看串口日志：是否有“AI写入天气成功”日志
+3. 检查传参是否为空（`city/text/temp` 必填）
 
 ### 备忘提醒不触发
 1. 确认时间格式为 `HH:MM`（如 `15:00`）

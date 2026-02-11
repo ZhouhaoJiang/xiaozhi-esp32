@@ -228,15 +228,15 @@ private:
     void RefreshAllData() {
         ESP_LOGI(TAG, "手动刷新所有数据...");
         
-        // 立即更新天气数据
-        WeatherManager::getInstance().update();
+        // 暂时停用板载和风天气拉取，天气请通过 MCP 工具 self.weather.update 刷新
+        // WeatherManager::getInstance().update();
         
         // 重新同步 NTP 时间
         SensorManager::getInstance().syncNtpTime();
         
         // 强制刷新屏幕显示
         if (display_) {
-            display_->SetChatMessage("system", "正在刷新数据...\n天气、时间已更新");
+            display_->SetChatMessage("system", "正在刷新数据...\n时间已更新，天气等待 MCP 同步");
         }
         
         ESP_LOGI(TAG, "数据刷新完成");
@@ -295,6 +295,36 @@ private:
                 
                 ESP_LOGI(TAG, "AI查询系统信息");
                 return std::string(info);
+            });
+
+        // ===== 天气写入工具（由 AI 侧 MCP 查询后回写到设备）=====
+        mcp_server.AddTool("self.weather.update",
+            "Write weather data to the device screen cache.\n"
+            "Use this after AI gets weather from an external MCP/weather source.\n"
+            "Args:\n"
+            "  `city`: City name (e.g. '苏州')\n"
+            "  `text`: Weather text (e.g. '晴', '多云', '小雨')\n"
+            "  `temp`: Temperature string without unit (e.g. '5', '-2', '26')\n"
+            "  `update_time`: Optional time text (e.g. '2026-02-11 23:45')",
+            PropertyList({
+                Property("city", kPropertyTypeString),
+                Property("text", kPropertyTypeString),
+                Property("temp", kPropertyTypeString),
+                Property("update_time", kPropertyTypeString, std::string(""))
+            }),
+            [](const PropertyList& properties) -> ReturnValue {
+                auto city = properties["city"].value<std::string>();
+                auto text = properties["text"].value<std::string>();
+                auto temp = properties["temp"].value<std::string>();
+                auto update_time = properties["update_time"].value<std::string>();
+
+                bool ok = WeatherManager::getInstance().updateFromExternal(city, text, temp, update_time);
+                if (!ok) {
+                    return std::string("天气写入失败：请检查 city/text/temp 是否为空");
+                }
+
+                ESP_LOGI(TAG, "AI写入天气成功: %s %s %s°C", city.c_str(), text.c_str(), temp.c_str());
+                return std::string("天气已更新：") + city + " " + text + " " + temp + "°C";
             });
         
         // ===== 配网工具 =====

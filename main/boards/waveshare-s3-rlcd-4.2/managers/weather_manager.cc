@@ -48,6 +48,28 @@ void WeatherManager::setApiConfig(const char* key, const char* host) {
     api_host_ = host;
 }
 
+bool WeatherManager::updateFromExternal(const std::string& city,
+                                        const std::string& weather_text,
+                                        const std::string& temperature,
+                                        const std::string& update_time) {
+    if (city.empty() || weather_text.empty() || temperature.empty()) {
+        ESP_LOGW(TAG, "外部天气数据无效：city/text/temp 不能为空");
+        return false;
+    }
+
+    latest_data_.city = city;
+    latest_data_.text = weather_text;
+    latest_data_.temp = temperature;
+    latest_data_.update_time = update_time.empty() ? "mcp" : update_time;
+    latest_data_.valid = true;
+
+    ESP_LOGI(TAG, "天气已由外部写入: %s %s %s°C",
+             latest_data_.city.c_str(),
+             latest_data_.text.c_str(),
+             latest_data_.temp.c_str());
+    return true;
+}
+
 // GZIP 安全解压（和风天气 API 返回 gzip 格式）
 static bool decompress_gzip_safe(const uint8_t* src, int src_len, char* dst, int dst_max_len, int* out_len) {
     if (src_len < 18 || src[0] != 0x1f || src[1] != 0x8b) return false;

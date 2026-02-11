@@ -39,11 +39,11 @@ LV_IMAGE_DECLARE(ui_img_battery_charging);
 static const char *TAG = "DataUpdate";
 
 void CustomLcdDisplay::StartDataUpdateTask() {
-    // 配置天气 API（密钥在 secret_config.h 中，不提交到 Git）
-    WeatherManager::getInstance().setApiConfig(
-        WEATHER_API_KEY,
-        WEATHER_API_HOST
-    );
+    // 暂时停用板载和风天气 API 配置，改为由 MCP 工具写入天气缓存
+    // WeatherManager::getInstance().setApiConfig(
+    //     WEATHER_API_KEY,
+    //     WEATHER_API_HOST
+    // );
     
     // 栈从 16KB 下调到 8KB，给音频/MQTT 留更多 SRAM 余量
     // 优先级保持较低，避免与语音收发实时链路抢占 CPU
@@ -53,8 +53,6 @@ void CustomLcdDisplay::StartDataUpdateTask() {
 void CustomLcdDisplay::DataUpdateTask(void *arg) {
     CustomLcdDisplay *self = (CustomLcdDisplay *)arg;
     bool time_synced = false;
-    uint32_t last_weather_update = 0;
-    bool last_weather_success = false;  // 上次天气请求是否成功
     
     // NTP 指数退避重试参数
     int ntp_retry_count = 0;
@@ -63,9 +61,6 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
     uint32_t ntp_last_sync_ms = 0;            // 上次 NTP 同步成功的时间（用于 24 小时校准）
     const uint32_t NTP_RESYNC_INTERVAL = 24 * 60 * 60 * 1000;  // 24 小时（毫秒）
     
-    // 天气更新间隔
-    const uint32_t WEATHER_NORMAL_INTERVAL = 10 * 60 * 1000;   // 成功后 10 分钟
-    const uint32_t WEATHER_RETRY_INTERVAL = 5 * 60 * 1000;     // 失败后 5 分钟重试
     // 电池电量变化很慢，降频采样可显著减轻 ADC 和 UI 刷新压力
     const uint32_t BATTERY_POLL_INTERVAL = 10 * 1000;           // 每 10 秒采样一次
     uint32_t last_battery_poll_ms = 0;
@@ -168,18 +163,7 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
         }
         
         // ===== 天气更新 =====
-        // 条件：网络已连接 + 连续 idle 足够久 + 到了更新间隔
-        if (network_connected && idle_long_enough) {
-            // 根据上次是否成功，决定间隔：成功 10 分钟，失败 5 分钟
-            uint32_t weather_interval = last_weather_success ? WEATHER_NORMAL_INTERVAL : WEATHER_RETRY_INTERVAL;
-            if (last_weather_update == 0 || (now_ms - last_weather_update > weather_interval)) {
-                last_weather_success = WeatherManager::getInstance().update();
-                last_weather_update = now_ms;
-                if (!last_weather_success) {
-                    ESP_LOGW(TAG, "天气更新失败，%d 分钟后重试", (int)(WEATHER_RETRY_INTERVAL / 60000));
-                }
-            }
-        }
+        // 暂时停用板载和风天气自动拉取，天气由 AI 通过 MCP 主动写入
         
         // ===== 时间获取（在锁外也需要用，所以先获取）=====
         time_t now;
@@ -438,7 +422,7 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                     ds == kDeviceStateConnecting) {
                     self->NotifyUserActivity();
                 }
-                
+
                 // 更新左侧表情区域（显示当前状态简称）
                 const char* emotion_text = "待命";
                 const char* status_text = "";
