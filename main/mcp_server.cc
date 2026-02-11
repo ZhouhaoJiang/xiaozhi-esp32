@@ -75,8 +75,14 @@ void McpServer::AddCommonTools() {
         }),
         [](const PropertyList& properties) -> ReturnValue {
             auto& app = Application::GetInstance();
+            std::string url = properties["url"].value<std::string>();
+
+            // 播放前检查是否有历史进度缓存
+            Application::MusicProgressEntry cached;
+            bool has_cached = app.GetCachedProgress(url, cached);
+
             bool ok = app.PlayMusicFromUrl(
-                properties["url"].value<std::string>(),
+                url,
                 properties["title"].value<std::string>(),
                 properties["artist"].value<std::string>(),
                 properties["lyric"].value<std::string>(),
@@ -84,16 +90,54 @@ void McpServer::AddCommonTools() {
             if (!ok) {
                 throw std::runtime_error("音乐播放失败：请检查 URL 或网络状态");
             }
+
+            // 如果有历史进度，告诉 AI（AI 可以转告用户 "上次听到 X:XX"）
+            if (has_cached && cached.progress_ms > 0) {
+                uint32_t min = cached.progress_ms / 60000;
+                uint32_t sec = (cached.progress_ms / 1000) % 60;
+                std::string msg = "已开始播放音乐（上次听到 "
+                    + std::to_string(min) + ":"
+                    + (sec < 10 ? "0" : "") + std::to_string(sec);
+                if (cached.total_ms > 0) {
+                    uint32_t t_min = cached.total_ms / 60000;
+                    uint32_t t_sec = (cached.total_ms / 1000) % 60;
+                    msg += "/" + std::to_string(t_min) + ":"
+                        + (t_sec < 10 ? "0" : "") + std::to_string(t_sec);
+                }
+                msg += "）";
+                return msg;
+            }
             return std::string("已开始播放音乐");
         });
 
     AddTool("self.music.stop",
-        "Stop current local music playback immediately.",
+        "Stop current local music playback immediately. Progress is saved automatically.",
         PropertyList(),
         [](const PropertyList&) -> ReturnValue {
             auto& app = Application::GetInstance();
+            // 在停止前读取当前进度，停止后进度会自动保存到缓存
+            uint32_t progress_ms = app.GetMusicProgressMs();
+            uint32_t total_ms = app.GetMusicTotalMs();
+            std::string title = app.GetCurrentMusicTitle();
             app.StopMusicPlayback();
-            return true;
+
+            // 返回停止时的进度信息（进度已自动保存，无需额外操作）
+            if (progress_ms > 0) {
+                uint32_t min = progress_ms / 60000;
+                uint32_t sec = (progress_ms / 1000) % 60;
+                std::string msg = "已停止播放 " + title + "（播放到 "
+                    + std::to_string(min) + ":"
+                    + (sec < 10 ? "0" : "") + std::to_string(sec);
+                if (total_ms > 0) {
+                    uint32_t t_min = total_ms / 60000;
+                    uint32_t t_sec = (total_ms / 1000) % 60;
+                    msg += "/" + std::to_string(t_min) + ":"
+                        + (t_sec < 10 ? "0" : "") + std::to_string(t_sec);
+                }
+                msg += "，进度已自动保存）";
+                return msg;
+            }
+            return std::string("已停止播放");
         });
 
     AddTool("self.music.update_lyric",
@@ -105,6 +149,55 @@ void McpServer::AddCommonTools() {
             auto& app = Application::GetInstance();
             app.UpdateMusicLyric(properties["lyric"].value<std::string>());
             return true;
+        });
+
+    AddTool("self.music.get_progress",
+        "Get current music playback progress AND history of all previously played songs with their saved progress. "
+        "Progress is saved AUTOMATICALLY when playback stops (user interruption, song ends, etc.), no need to save manually. "
+        "Returns JSON: { current: {playing, title, url, progress_ms, total_ms}, history: [{title, url, progress_ms, total_ms}, ...] }",
+        PropertyList(),
+        [](const PropertyList&) -> ReturnValue {
+            auto& app = Application::GetInstance();
+            bool playing = app.IsMusicPlaying();
+            uint32_t progress_ms = app.GetMusicProgressMs();
+            uint32_t total_ms = app.GetMusicTotalMs();
+            std::string title = app.GetCurrentMusicTitle();
+            std::string url = app.GetCurrentMusicUrl();
+            auto cache = app.GetAllCachedProgress();
+
+            // JSON 转义辅助
+            auto esc = [](const std::string& s) -> std::string {
+                std::string out;
+                out.reserve(s.size());
+                for (char c : s) {
+                    if (c == '"') out += "\\\"";
+                    else if (c == '\\') out += "\\\\";
+                    else out += c;
+                }
+                return out;
+            };
+
+            // 当前播放状态
+            std::string result = "{\"current\":{\"playing\":";
+            result += playing ? "true" : "false";
+            result += ",\"title\":\"" + esc(title) + "\"";
+            result += ",\"url\":\"" + esc(url) + "\"";
+            result += ",\"progress_ms\":" + std::to_string(progress_ms);
+            result += ",\"total_ms\":" + std::to_string(total_ms);
+            result += "},\"history\":[";
+
+            // 历史进度缓存（设备自动保存的）
+            bool first = true;
+            for (const auto& [cached_url, entry] : cache) {
+                if (!first) result += ",";
+                first = false;
+                result += "{\"title\":\"" + esc(entry.title) + "\"";
+                result += ",\"url\":\"" + esc(cached_url) + "\"";
+                result += ",\"progress_ms\":" + std::to_string(entry.progress_ms);
+                result += ",\"total_ms\":" + std::to_string(entry.total_ms) + "}";
+            }
+            result += "]}";
+            return result;
         });
     
     auto backlight = board.GetBacklight();

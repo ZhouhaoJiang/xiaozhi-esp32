@@ -524,7 +524,11 @@ void Application::InitializeProtocol() {
     });
     
     protocol_->OnAudioChannelClosed([this, &board]() {
-        board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        // 如果正在播放音乐（HTTP 流），不要切回省电模式，
+        // 否则会覆盖 PlayMusicFromUrl 里设的高性能模式导致卡顿
+        if (!music_playing_.load()) {
+            board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
+        }
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
@@ -1117,6 +1121,20 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
         return false;
     }
 
+    // 防重播保护：同一 URL 在播放结束后 15 秒内不允许重复启动
+    // 防止大模型"播放结束 -> 回答用户 -> 又调一次 play_url"的死循环
+    {
+        std::lock_guard<std::mutex> lock(music_playback_mutex_);
+        if (!last_played_url_.empty() && last_played_url_ == url && last_play_finished_ms_ > 0) {
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            int64_t elapsed = now_ms - last_play_finished_ms_;
+            if (elapsed < 15000) {
+                ESP_LOGW(TAG, "防重播：同一 URL 在 %lld ms 前刚播完，跳过", elapsed);
+                return false;
+            }
+        }
+    }
+
     // 先停止旧播放，避免多个任务同时争用音频输出。
     StopMusicPlayback(false);
 
@@ -1131,11 +1149,18 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
     audio_service_.ResetDecoder();
     audio_service_.SetExternalPlaybackActive(true);
 
+    // 音乐播放走 HTTP 流，不经过 AudioChannel，WiFi 不会自动切高性能
+    // 这里手动关闭省电，避免 MAX_MODEM 休眠导致下载卡顿
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::PERFORMANCE);
+
     {
         std::lock_guard<std::mutex> lock(music_playback_mutex_);
         stop_music_playback_.store(false);
         music_playing_.store(true);
+        music_progress_ms_.store(0);
+        music_total_ms_.store(0);
         current_music_title_ = title;
+        current_music_url_ = url;
     }
 
     auto display_title = title.empty() ? "未知歌曲" : title;
@@ -1490,6 +1515,12 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
                             static_cast<uint64_t>(total_output_samples) * 1000
                             / (codec->output_sample_rate() * codec->output_channels()));
 
+                        // 同步更新原子变量，供 MCP 工具查询当前进度
+                        music_progress_ms_.store(current_ms);
+                        if (lyric_total_ms > 0) {
+                            music_total_ms_.store(lyric_total_ms);
+                        }
+
                         // 更新进度条（无论有没有歌词都要更新）
                         // 没有歌词时 lyric_total_ms=0，用 0 让 SetMusicProgress 只显示播放时间
                         display->SetMusicProgress(current_ms, lyric_total_ms);
@@ -1550,8 +1581,34 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
         music_playing_.store(false);
         stop_music_playback_.store(false);
         music_playback_task_handle_ = nullptr;
+        // 记录刚播完的 URL 和时间戳，用于防重播保护
+        last_played_url_ = url;
+        last_play_finished_ms_ = esp_timer_get_time() / 1000;
+
+        // ── 自动保存播放进度到缓存（无需 AI 干预）──
+        uint32_t final_progress = music_progress_ms_.load();
+        uint32_t final_total = music_total_ms_.load();
+        if (!url.empty() && final_progress > 0) {
+            // 如果缓存满了，删掉最旧的（简单策略：删第一个）
+            if (music_progress_cache_.size() >= kMaxProgressCacheSize) {
+                music_progress_cache_.erase(music_progress_cache_.begin());
+            }
+            music_progress_cache_[url] = {
+                current_music_title_,
+                final_progress,
+                final_total
+            };
+            ESP_LOGI(TAG, "自动保存播放进度: %s @ %lu/%lu ms",
+                     current_music_title_.c_str(),
+                     static_cast<unsigned long>(final_progress),
+                     static_cast<unsigned long>(final_total));
+        }
+
         current_music_title_.clear();
     }
+
+    // 播放结束，恢复 WiFi 省电模式
+    Board::GetInstance().SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
 
     if (stopped_by_user) {
         ESP_LOGI(TAG, "音乐播放已被用户中断，累计读取=%u bytes, 输出=%u samples",
