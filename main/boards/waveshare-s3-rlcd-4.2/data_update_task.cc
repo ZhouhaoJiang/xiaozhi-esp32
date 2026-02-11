@@ -21,7 +21,6 @@
 
 #include "application.h"
 #include "board.h"
-#include "config.h"
 #include "settings.h"
 #include "assets/lang_config.h"
 #include "managers/sensor_manager.h"
@@ -46,7 +45,9 @@ void CustomLcdDisplay::StartDataUpdateTask() {
         WEATHER_API_HOST
     );
     
-    xTaskCreate(DataUpdateTask, "weather_ui_update", 16384, this, 3, &update_task_handle_);
+    // 栈从 16KB 下调到 8KB，给音频/MQTT 留更多 SRAM 余量
+    // 优先级保持较低，避免与语音收发实时链路抢占 CPU
+    xTaskCreate(DataUpdateTask, "weather_ui_update", 8192, this, 2, &update_task_handle_);
 }
 
 void CustomLcdDisplay::DataUpdateTask(void *arg) {
@@ -65,15 +66,28 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
     // 天气更新间隔
     const uint32_t WEATHER_NORMAL_INTERVAL = 10 * 60 * 1000;   // 成功后 10 分钟
     const uint32_t WEATHER_RETRY_INTERVAL = 5 * 60 * 1000;     // 失败后 5 分钟重试
+    // 电池电量变化很慢，降频采样可显著减轻 ADC 和 UI 刷新压力
+    const uint32_t BATTERY_POLL_INTERVAL = 10 * 1000;           // 每 10 秒采样一次
+    uint32_t last_battery_poll_ms = 0;
+    int cached_battery_level = 0;
+    bool cached_charging = false, cached_discharging = false;
+    bool battery_cached = false;
     
     // 等待一会让系统启动完成
     vTaskDelay(pdMS_TO_TICKS(3000));
+    
+    // 记录进入 idle 的时刻，用于"连续 idle 足够久才发网络请求"的保护
+    uint32_t idle_since_ms = 0;
     
     // 初始化活动时间（系统启动算一次活动）
     self->last_activity_ms_ = xTaskGetTickCount() * portTICK_PERIOD_MS;
     
     // 用于备忘闹钟检查的时间信息（在锁外使用）
     struct tm timeinfo;
+    
+    // 时区设置只需初始化一次，避免每秒 setenv/tzset 带来的系统开销
+    setenv("TZ", TIMEZONE_STRING, 1);
+    tzset();
     
     while (1) {
         auto& app = Application::GetInstance();
@@ -85,9 +99,26 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                                   ds != kDeviceStateUnknown);
         
         uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        const bool in_audio_session = (ds == kDeviceStateConnecting ||
+                                       ds == kDeviceStateListening ||
+                                       ds == kDeviceStateSpeaking);
+
+        // ===== 连续 idle 计时 =====
+        // NTP / 天气等网络请求必须在"连续 idle 超过 N 秒"后才发，
+        // 防止刚开机或刚结束对话就发 HTTPS 请求，和下一次唤醒撞车导致首句卡顿
+        const uint32_t IDLE_GUARD_MS = 5000;  // 连续 idle 至少 5 秒才允许网络请求
+        if (ds == kDeviceStateIdle) {
+            if (idle_since_ms == 0) {
+                idle_since_ms = now_ms;
+            }
+        } else {
+            idle_since_ms = 0;  // 非 idle 立刻重置
+        }
+        bool idle_long_enough = (idle_since_ms > 0 && (now_ms - idle_since_ms >= IDLE_GUARD_MS));
         
         // ===== NTP 时间同步 =====
-        if (network_connected) {
+        // 仅在连续 idle 足够久后同步，避免与 AI 对话抢网络/内存
+        if (network_connected && idle_long_enough) {
             bool should_sync = false;
             
             if (!time_synced && ntp_retry_count < NTP_MAX_RETRIES) {
@@ -137,8 +168,8 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
         }
         
         // ===== 天气更新 =====
-        // 条件：网络已连接 + idle 状态 + 到了更新间隔
-        if (network_connected && ds == kDeviceStateIdle) {
+        // 条件：网络已连接 + 连续 idle 足够久 + 到了更新间隔
+        if (network_connected && idle_long_enough) {
             // 根据上次是否成功，决定间隔：成功 10 分钟，失败 5 分钟
             uint32_t weather_interval = last_weather_success ? WEATHER_NORMAL_INTERVAL : WEATHER_RETRY_INTERVAL;
             if (last_weather_update == 0 || (now_ms - last_weather_update > weather_interval)) {
@@ -151,10 +182,6 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
         }
         
         // ===== 时间获取（在锁外也需要用，所以先获取）=====
-        // 确保时区正确（小智的 ota.cc 会用 settimeofday 覆盖系统时间）
-        setenv("TZ", TIMEZONE_STRING, 1);
-        tzset();
-        
         time_t now;
         time(&now);
         localtime_r(&now, &timeinfo);
@@ -280,94 +307,126 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
         // 🔑 如果正在显示系统信息滚动，跳过 UI 更新（避免锁竞争）
         if (!self->showing_system_info_) {
             DisplayLockGuard lock(self);
-            
-            // 2. 温湿度更新
-            SensorData sd = SensorManager::getInstance().getTempHumidity();
-            if (sd.valid) {
-                if (fabs(sd.temperature - self->last_temp_) > 0.2f || fabs(sd.humidity - self->last_humi_) > 1.0f) {
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "%.1f°C  %.0f%%", sd.temperature, sd.humidity);
-                    if (self->sensor_label_) lv_label_set_text(self->sensor_label_, buf);
-                    if (self->music_sensor_label_) lv_label_set_text(self->music_sensor_label_, buf);
-                    self->last_temp_ = sd.temperature;
-                    self->last_humi_ = sd.humidity;
-                }
-            }
+            static uint32_t last_noncritical_ui_update_ms = 0;
+            const bool allow_noncritical_update =
+                !in_audio_session ||
+                last_noncritical_ui_update_ms == 0 ||
+                (now_ms - last_noncritical_ui_update_ms >= 5000);
 
-            // 3. 天气更新
-            WeatherData wd = WeatherManager::getInstance().getLatestData();
-            if (wd.valid && self->weather_label_) {
-                char weather_buf[48];
-                snprintf(weather_buf, sizeof(weather_buf), "%s %s %s°C", 
-                         wd.city.c_str(), wd.text.c_str(), wd.temp.c_str());
-                lv_label_set_text(self->weather_label_, weather_buf);
-            }
+            // 对话期间将非关键 UI/传感器刷新降频到 5 秒一次，避免与语音链路抢占 CPU
+            if (allow_noncritical_update) {
+                last_noncritical_ui_update_ms = now_ms;
 
-            // 4. 电池状态更新
-            int level = 0;
-            bool charging = false, discharging = false;
-            auto& board = Board::GetInstance();
-            if (board.GetBatteryLevel(level, charging, discharging)) {
-                if (self->battery_icon_img_) {
-                    if (charging) {
-                        lv_image_set_src(self->battery_icon_img_, &ui_img_battery_charging);
-                    } else {
-                        if (level < 20) lv_image_set_src(self->battery_icon_img_, &ui_img_battery_low);
-                        else if (level < 60) lv_image_set_src(self->battery_icon_img_, &ui_img_battery_medium);
-                        else lv_image_set_src(self->battery_icon_img_, &ui_img_battery_full);
+                // 2. 温湿度更新
+                SensorData sd = SensorManager::getInstance().getTempHumidity();
+                if (sd.valid) {
+                    if (fabs(sd.temperature - self->last_temp_) > 0.2f || fabs(sd.humidity - self->last_humi_) > 1.0f) {
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%.1f°C  %.0f%%", sd.temperature, sd.humidity);
+                        if (self->sensor_label_) lv_label_set_text(self->sensor_label_, buf);
+                        if (self->music_sensor_label_) lv_label_set_text(self->music_sensor_label_, buf);
+                        self->last_temp_ = sd.temperature;
+                        self->last_humi_ = sd.humidity;
                     }
                 }
-                if (self->music_battery_icon_img_) {
-                    if (charging) {
-                        lv_image_set_src(self->music_battery_icon_img_, &ui_img_battery_charging);
-                    } else {
-                        if (level < 20) lv_image_set_src(self->music_battery_icon_img_, &ui_img_battery_low);
-                        else if (level < 60) lv_image_set_src(self->music_battery_icon_img_, &ui_img_battery_medium);
-                        else lv_image_set_src(self->music_battery_icon_img_, &ui_img_battery_full);
+
+                // 3. 天气更新（内容变化时才刷新，避免无效重绘）
+                WeatherData wd = WeatherManager::getInstance().getLatestData();
+                if (wd.valid && self->weather_label_) {
+                    char weather_buf[48];
+                    snprintf(weather_buf, sizeof(weather_buf), "%s %s %s°C",
+                             wd.city.c_str(), wd.text.c_str(), wd.temp.c_str());
+                    static std::string last_weather_text;
+                    if (last_weather_text != weather_buf) {
+                        lv_label_set_text(self->weather_label_, weather_buf);
+                        last_weather_text = weather_buf;
                     }
                 }
-                if (self->battery_pct_label_) {
-                    char bat_buf[16];
-                    snprintf(bat_buf, sizeof(bat_buf), "%d%%", level);
-                    lv_label_set_text(self->battery_pct_label_, bat_buf);
-                    if (self->music_battery_pct_label_) lv_label_set_text(self->music_battery_pct_label_, bat_buf);
-                }
 
-                // 低电量提醒（对齐原版行为）：
-                // - 放电且低于 20% 时显示弹窗并播一次提示音
-                // - 回升到 25% 及以上（或进入充电）后隐藏，避免 19/20% 抖动反复闪烁
-                static bool low_battery_popup_visible = false;
-                const bool should_show_low_battery = (!charging && discharging && level < 20);
-                const bool should_hide_low_battery = (charging || !discharging || level >= 25);
-                if (self->low_battery_popup_) {
-                    if (!low_battery_popup_visible && should_show_low_battery) {
-                        lv_obj_remove_flag(self->low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
-                        app.PlaySound(Lang::Sounds::OGG_LOW_BATTERY);
-                        low_battery_popup_visible = true;
-                    } else if (low_battery_popup_visible && should_hide_low_battery) {
-                        lv_obj_add_flag(self->low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
-                        low_battery_popup_visible = false;
+                // 4. 电池状态更新（采样降频 + 变化更新）
+                auto& board = Board::GetInstance();
+                if (!battery_cached || last_battery_poll_ms == 0 ||
+                    (now_ms - last_battery_poll_ms >= BATTERY_POLL_INTERVAL)) {
+                    int level = 0;
+                    bool charging = false, discharging = false;
+                    if (board.GetBatteryLevel(level, charging, discharging)) {
+                        cached_battery_level = level;
+                        cached_charging = charging;
+                        cached_discharging = discharging;
+                        battery_cached = true;
+                        last_battery_poll_ms = now_ms;
                     }
                 }
-            }
 
-            // 5. WiFi 图标更新
-            if (self->wifi_icon_img_) {
-                if (ds != kDeviceStateStarting && ds != kDeviceStateWifiConfiguring) {
-                    lv_image_set_src(self->wifi_icon_img_, &ui_img_wifi);
-                } else if (ds == kDeviceStateWifiConfiguring) {
-                    lv_image_set_src(self->wifi_icon_img_, &ui_img_wifi_low);
-                } else {
-                    lv_image_set_src(self->wifi_icon_img_, &ui_img_wifi_off);
+                if (battery_cached) {
+                    static int last_icon_mode = -1;       // 0=low,1=medium,2=full,3=charging
+                    static int last_battery_level = -1;   // 上次显示的电量百分比
+                    int icon_mode = 2;
+                    if (cached_charging) {
+                        icon_mode = 3;
+                    } else if (cached_battery_level < 20) {
+                        icon_mode = 0;
+                    } else if (cached_battery_level < 60) {
+                        icon_mode = 1;
+                    }
+
+                    if (icon_mode != last_icon_mode) {
+                        const void* icon_src = &ui_img_battery_full;
+                        if (icon_mode == 3) icon_src = &ui_img_battery_charging;
+                        else if (icon_mode == 0) icon_src = &ui_img_battery_low;
+                        else if (icon_mode == 1) icon_src = &ui_img_battery_medium;
+
+                        if (self->battery_icon_img_) {
+                            lv_image_set_src(self->battery_icon_img_, icon_src);
+                        }
+                        if (self->music_battery_icon_img_) {
+                            lv_image_set_src(self->music_battery_icon_img_, icon_src);
+                        }
+                        last_icon_mode = icon_mode;
+                    }
+
+                    if (self->battery_pct_label_ && cached_battery_level != last_battery_level) {
+                        char bat_buf[16];
+                        snprintf(bat_buf, sizeof(bat_buf), "%d%%", cached_battery_level);
+                        lv_label_set_text(self->battery_pct_label_, bat_buf);
+                        if (self->music_battery_pct_label_) lv_label_set_text(self->music_battery_pct_label_, bat_buf);
+                        last_battery_level = cached_battery_level;
+                    }
+
+                    // 低电量提醒（对齐原版行为）：
+                    // - 放电且低于 20% 时显示弹窗并播一次提示音
+                    // - 回升到 25% 及以上（或进入充电）后隐藏，避免 19/20% 抖动反复闪烁
+                    static bool low_battery_popup_visible = false;
+                    const bool should_show_low_battery = (!cached_charging && cached_discharging && cached_battery_level < 20);
+                    const bool should_hide_low_battery = (cached_charging || !cached_discharging || cached_battery_level >= 25);
+                    if (self->low_battery_popup_) {
+                        if (!low_battery_popup_visible && should_show_low_battery) {
+                            lv_obj_remove_flag(self->low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+                            app.PlaySound(Lang::Sounds::OGG_LOW_BATTERY);
+                            low_battery_popup_visible = true;
+                        } else if (low_battery_popup_visible && should_hide_low_battery) {
+                            lv_obj_add_flag(self->low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
+                            low_battery_popup_visible = false;
+                        }
+                    }
                 }
-            }
-            if (self->music_wifi_icon_img_) {
-                if (ds != kDeviceStateStarting && ds != kDeviceStateWifiConfiguring) {
-                    lv_image_set_src(self->music_wifi_icon_img_, &ui_img_wifi);
-                } else if (ds == kDeviceStateWifiConfiguring) {
-                    lv_image_set_src(self->music_wifi_icon_img_, &ui_img_wifi_low);
-                } else {
-                    lv_image_set_src(self->music_wifi_icon_img_, &ui_img_wifi_off);
+
+                // 5. WiFi 图标更新（状态变化时才更新）
+                static DeviceState last_wifi_state = kDeviceStateUnknown;
+                if (ds != last_wifi_state) {
+                    const void* wifi_src = &ui_img_wifi_off;
+                    if (ds != kDeviceStateStarting && ds != kDeviceStateWifiConfiguring) {
+                        wifi_src = &ui_img_wifi;
+                    } else if (ds == kDeviceStateWifiConfiguring) {
+                        wifi_src = &ui_img_wifi_low;
+                    }
+                    if (self->wifi_icon_img_) {
+                        lv_image_set_src(self->wifi_icon_img_, wifi_src);
+                    }
+                    if (self->music_wifi_icon_img_) {
+                        lv_image_set_src(self->music_wifi_icon_img_, wifi_src);
+                    }
+                    last_wifi_state = ds;
                 }
             }
 

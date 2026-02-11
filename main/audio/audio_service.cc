@@ -513,16 +513,30 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
 
 bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
+    decode_push_total_++;
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
         if (wait) {
             audio_queue_cv_.wait(lock, [this]() { return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE; });
         } else {
+            decode_drop_total_++;
             return false;
         }
     }
     audio_decode_queue_.push_back(std::move(packet));
     audio_queue_cv_.notify_all();
     return true;
+}
+
+AudioQueuePressureStats AudioService::GetQueuePressureStats() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    AudioQueuePressureStats stats;
+    stats.decode_queue_size = audio_decode_queue_.size();
+    stats.send_queue_size = audio_send_queue_.size();
+    stats.encode_queue_size = audio_encode_queue_.size();
+    stats.playback_queue_size = audio_playback_queue_.size();
+    stats.decode_push_total = decode_push_total_;
+    stats.decode_drop_total = decode_drop_total_;
+    return stats;
 }
 
 std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {

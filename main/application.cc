@@ -1170,6 +1170,7 @@ bool Application::PlayMusicFromUrl(const std::string& url, const std::string& ti
         // 触发音乐播放时，优先切到音乐页，避免歌词继续显示在首页 AI 卡片
         display->SwitchToMusicPage();
         display->SetStatus("音乐播放");
+        display->SetChatMessage("system", "音乐播放中~");
         display->SetMusicInfo(display_title.c_str(), display_artist.c_str());
         display->SetMusicProgress(0, 1);
         display->SetMusicLyric("");
@@ -1638,6 +1639,8 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
             // 清除歌词/聊天消息区域，恢复待命状态
             display->SetMusicLyric("");
             display->SetMusicProgress(0, 1);
+            // 播放结束后主动重置 AI 文案，避免停留在上一条工具/提示文本
+            display->SetChatMessage("system", "AI 待命");
             display->ShowNotification("音乐播放结束");
             // 自动返回天气首页，避免停留在空白音乐页
             display->SwitchToWeatherPage();

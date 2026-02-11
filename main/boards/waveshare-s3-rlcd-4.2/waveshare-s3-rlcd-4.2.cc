@@ -3,6 +3,7 @@
 #include <driver/spi_common.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <string>
 #include <soc/rtc.h>
 #include "custom_lcd_display.h"
 #include "wifi_board.h"
@@ -32,6 +33,25 @@ private:
     CustomLcdDisplay *display_;
     adc_oneshot_unit_handle_t adc1_handle;
     adc_cali_handle_t cali_handle;
+
+    // 校验时间标签是否为 HH:MM（24 小时制）
+    bool IsValidMemoTimeLabel(const std::string& time_str) {
+        if (time_str.empty()) {
+            return true;  // 允许无时间备忘
+        }
+        if (time_str.size() != 5 || time_str[2] != ':') {
+            return false;
+        }
+        if (time_str[0] < '0' || time_str[0] > '9' ||
+            time_str[1] < '0' || time_str[1] > '9' ||
+            time_str[3] < '0' || time_str[3] > '9' ||
+            time_str[4] < '0' || time_str[4] > '9') {
+            return false;
+        }
+        int hh = (time_str[0] - '0') * 10 + (time_str[1] - '0');
+        int mm = (time_str[3] - '0') * 10 + (time_str[4] - '0');
+        return (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59);
+    }
 
     void InitializeI2c() {
         // I2C 总线初始化
@@ -339,7 +359,11 @@ private:
             "Use when user says: '提醒我下午3点开会', '记住买牛奶', '待办写周报'\n"
             "Args:\n"
             "  `content`: Short memo text (max ~8 Chinese chars for best display on the small screen)\n"
-            "  `time`: Time label (e.g. '15:00', '明天', '周五'). Empty string if no specific time.",
+            "  `time`: Time label in strict HH:MM 24-hour format (e.g. '07:30', '15:00'). Empty string if no specific time.\n"
+            "Important:\n"
+            "  - You MUST convert relative expressions to HH:MM before calling this tool.\n"
+            "  - Examples: '5分钟后' -> '21:18', '半小时后' -> '21:43', '晚上8点' -> '20:00'.\n"
+            "  - Do NOT pass natural language like '5分钟后' or '明天'.",
             PropertyList({
                 Property("content", kPropertyTypeString),
                 Property("time", kPropertyTypeString, std::string(""))
@@ -347,6 +371,9 @@ private:
             [this](const PropertyList& properties) -> ReturnValue {
                 auto content = properties["content"].value<std::string>();
                 auto time_str = properties["time"].value<std::string>();
+                if (!IsValidMemoTimeLabel(time_str)) {
+                    return std::string("时间格式无效：请使用 HH:MM（24小时制），例如 07:30、15:00；不要传“5分钟后”这类自然语言");
+                }
 
                 // 读取现有列表
                 std::string json_str;
@@ -382,7 +409,8 @@ private:
 
                 // 刷新屏幕
                 if (display_) display_->RefreshMemoDisplay();
-                ESP_LOGI(TAG, "备忘已添加: %s", content.c_str());
+                ESP_LOGI(TAG, "备忘已添加: 内容=%s, 时间=%s",
+                         content.c_str(), time_str.c_str());
                 return std::string("已添加备忘: ") + content + "（共" + std::to_string(count) + "条）";
             });
 

@@ -225,19 +225,10 @@ void CustomLcdDisplay::SetChatMessage(const char* role, const char* content) {
         ESP_LOGI("CustomLcdDisplay", "AI 回答过长（%dpx > %dpx），启用慢速滚动", label_h, visible_h);
     }
 
-    // 音乐页同步显示 AI 文案（过滤掉 MCP 工具调用原文，那些是内部指令不适合展示）
+    // 音乐页同步显示 AI 文案
     if (music_chat_status_label_) {
-        std::string msg(content);
-        // 过滤 MCP 工具调用原文（AI 调用工具时会在回复里输出工具名）
-        // 格式举例："% search_music_pro..."、"% self.music.play_url..."、"&self.disp.switch..."
-        // 统一规则：以 "% " 或 "& " 开头，或包含 "self." 的都算工具调用
-        bool is_mcp_call = (msg.rfind("% ", 0) == 0 ||
-                            msg.rfind("& ", 0) == 0 ||
-                            msg.find("self.") != std::string::npos);
-        if (!is_mcp_call) {
-            lv_label_set_long_mode(music_chat_status_label_, LV_LABEL_LONG_WRAP);
-            lv_label_set_text(music_chat_status_label_, content);
-        }
+        lv_label_set_long_mode(music_chat_status_label_, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(music_chat_status_label_, content);
     }
 }
 
