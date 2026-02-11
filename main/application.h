@@ -121,26 +121,6 @@ public:
     uint32_t GetMusicTotalMs() const { return music_total_ms_.load(); }
     std::string GetCurrentMusicTitle() const { std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(music_playback_mutex_)); return current_music_title_; }
     std::string GetCurrentMusicUrl() const { std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(music_playback_mutex_)); return current_music_url_; }
-
-    // 播放进度缓存条目（播放停止时设备自动保存，无需 AI 干预）
-    struct MusicProgressEntry {
-        std::string title;
-        uint32_t progress_ms = 0;
-        uint32_t total_ms = 0;
-    };
-
-    // 获取某首歌的缓存进度（自动保存的，无需 AI 调用）
-    bool GetCachedProgress(const std::string& url, MusicProgressEntry& out) const {
-        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(music_playback_mutex_));
-        auto it = music_progress_cache_.find(url);
-        if (it != music_progress_cache_.end()) { out = it->second; return true; }
-        return false;
-    }
-    // 获取所有缓存的进度（MCP get_progress 用）
-    std::map<std::string, MusicProgressEntry> GetAllCachedProgress() const {
-        std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(music_playback_mutex_));
-        return music_progress_cache_;
-    }
     void UpdateMusicLyric(const std::string& lyric);
     AudioService& GetAudioService() { return audio_service_; }
     
@@ -182,9 +162,6 @@ private:
     int64_t last_play_finished_ms_ = 0;         // 上一次播放结束的时间戳（毫秒）
     std::mutex music_playback_mutex_;
 
-    // 播放进度缓存（结构体在 public 区域定义）
-    static constexpr size_t kMaxProgressCacheSize = 20;  // ESP32 内存有限，最多缓存 20 首
-    std::map<std::string, MusicProgressEntry> music_progress_cache_;  // 受 music_playback_mutex_ 保护
     int clock_ticks_ = 0;
     TaskHandle_t activation_task_handle_ = nullptr;
 

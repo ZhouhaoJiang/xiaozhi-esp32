@@ -1323,6 +1323,7 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
     auto http = network->CreateHttp(3);
     do {
         http->SetHeader("User-Agent", SystemInfo::GetUserAgent());
+
         if (!http->Open("GET", url)) {
             ESP_LOGE(TAG, "播放音乐失败：无法打开 URL: %s", url.c_str());
             playback_failed = true;
@@ -1542,6 +1543,7 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
                                 UpdateMusicLyric(prev_line + "\n" + curr_line + "\n" + next_line);
                             }
                         }
+
                     }
                 }
 
@@ -1585,25 +1587,6 @@ void Application::MusicPlaybackTask(std::string url, std::string title, std::str
         // 记录刚播完的 URL 和时间戳，用于防重播保护
         last_played_url_ = url;
         last_play_finished_ms_ = esp_timer_get_time() / 1000;
-
-        // ── 自动保存播放进度到缓存（无需 AI 干预）──
-        uint32_t final_progress = music_progress_ms_.load();
-        uint32_t final_total = music_total_ms_.load();
-        if (!url.empty() && final_progress > 0) {
-            // 如果缓存满了，删掉最旧的（简单策略：删第一个）
-            if (music_progress_cache_.size() >= kMaxProgressCacheSize) {
-                music_progress_cache_.erase(music_progress_cache_.begin());
-            }
-            music_progress_cache_[url] = {
-                current_music_title_,
-                final_progress,
-                final_total
-            };
-            ESP_LOGI(TAG, "自动保存播放进度: %s @ %lu/%lu ms",
-                     current_music_title_.c_str(),
-                     static_cast<unsigned long>(final_progress),
-                     static_cast<unsigned long>(final_total));
-        }
 
         current_music_title_.clear();
     }

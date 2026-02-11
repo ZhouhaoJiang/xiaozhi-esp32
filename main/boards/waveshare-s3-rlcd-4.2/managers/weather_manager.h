@@ -28,6 +28,13 @@ public:
     // 设置 API 密钥和主机（从配置中读取）
     void setApiConfig(const char* key, const char* host);
 
+    // 通过外部工具（如 MCP）直接写入天气数据
+    // 适用于不走板载 HTTP 天气接口，而由 AI 侧先查好天气再下发到设备
+    bool updateFromExternal(const std::string& city,
+                            const std::string& weather_text,
+                            const std::string& temperature,
+                            const std::string& update_time = "");
+
 private:
     WeatherManager();
     WeatherData latest_data_;
