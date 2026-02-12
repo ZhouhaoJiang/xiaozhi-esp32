@@ -837,6 +837,8 @@ idf_component_register(SRCS ${SOURCES}
                         esp_lcd
                         json
                         esp_adc
+                        fatfs
+                        sdmmc
                     )
 
 # Use target_compile_definitions to define BOARD_TYPE, BOARD_NAME

@@ -25,6 +25,7 @@
 #include "assets/lang_config.h"
 #include "managers/sensor_manager.h"
 #include "managers/weather_manager.h"
+#include "managers/pomodoro_manager.h"
 #include "secret_config.h"
 
 // 声明状态栏图标（DataUpdateTask 需要更新图标）
@@ -207,6 +208,7 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                 strftime(time_buf, sizeof(time_buf), "%H:%M", &timeinfo);
                 if (self->time_label_) lv_label_set_text(self->time_label_, time_buf);
                 if (self->music_time_label_) lv_label_set_text(self->music_time_label_, time_buf);
+                if (self->pomo_time_label_) lv_label_set_text(self->pomo_time_label_, time_buf);
 
                 const char *weeks_en[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
                 if (self->day_label_) lv_label_set_text(self->day_label_, weeks_en[timeinfo.tm_wday]);
@@ -309,6 +311,7 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                         snprintf(buf, sizeof(buf), "%.1f°C  %.0f%%", sd.temperature, sd.humidity);
                         if (self->sensor_label_) lv_label_set_text(self->sensor_label_, buf);
                         if (self->music_sensor_label_) lv_label_set_text(self->music_sensor_label_, buf);
+                        if (self->pomo_sensor_label_) lv_label_set_text(self->pomo_sensor_label_, buf);
                         self->last_temp_ = sd.temperature;
                         self->last_humi_ = sd.humidity;
                     }
@@ -366,6 +369,9 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                         if (self->music_battery_icon_img_) {
                             lv_image_set_src(self->music_battery_icon_img_, icon_src);
                         }
+                        if (self->pomo_battery_icon_img_) {
+                            lv_image_set_src(self->pomo_battery_icon_img_, icon_src);
+                        }
                         last_icon_mode = icon_mode;
                     }
 
@@ -374,6 +380,7 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                         snprintf(bat_buf, sizeof(bat_buf), "%d%%", cached_battery_level);
                         lv_label_set_text(self->battery_pct_label_, bat_buf);
                         if (self->music_battery_pct_label_) lv_label_set_text(self->music_battery_pct_label_, bat_buf);
+                        if (self->pomo_battery_pct_label_) lv_label_set_text(self->pomo_battery_pct_label_, bat_buf);
                         last_battery_level = cached_battery_level;
                     }
 
@@ -410,6 +417,9 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                     if (self->music_wifi_icon_img_) {
                         lv_image_set_src(self->music_wifi_icon_img_, wifi_src);
                     }
+                    if (self->pomo_wifi_icon_img_) {
+                        lv_image_set_src(self->pomo_wifi_icon_img_, wifi_src);
+                    }
                     last_wifi_state = ds;
                 }
             }
@@ -444,6 +454,14 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                 if (self->music_emotion_label_) {
                     lv_label_set_text(self->music_emotion_label_, emotion_text);
                 }
+                // 番茄钟运行中时，番茄钟页面的 AI 卡片不被普通状态变化覆盖
+                // 只在空闲时才让番茄钟页面跟随设备状态
+                auto& pomo_inst = PomodoroManager::getInstance();
+                bool pomo_running = (pomo_inst.getState() != PomodoroManager::IDLE);
+
+                if (!pomo_running && self->pomo_emotion_label_) {
+                    lv_label_set_text(self->pomo_emotion_label_, emotion_text);
+                }
                 // 非说话/配网/激活状态时更新右侧文字（这些状态由 Alert/SetChatMessage 管理详细信息）
                 if (ds != kDeviceStateSpeaking && ds != kDeviceStateWifiConfiguring &&
                     ds != kDeviceStateActivating && self->chat_status_label_ && strlen(status_text) > 0) {
@@ -459,9 +477,68 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                     lv_label_set_long_mode(self->music_chat_status_label_, LV_LABEL_LONG_WRAP);
                     lv_label_set_text(self->music_chat_status_label_, status_text);
                 }
+                if (!pomo_running && ds != kDeviceStateSpeaking && ds != kDeviceStateWifiConfiguring &&
+                    ds != kDeviceStateActivating && self->pomo_chat_status_label_ && strlen(status_text) > 0) {
+                    lv_label_set_long_mode(self->pomo_chat_status_label_, LV_LABEL_LONG_WRAP);
+                    lv_label_set_text(self->pomo_chat_status_label_, status_text);
+                }
                 last_ds = ds;
             }
         }  // DisplayLockGuard 自动释放
+
+        // ===== 番茄钟 UI 刷新 =====
+        // 番茄钟运行时，每秒更新倒计时显示和进度条
+        {
+            auto& pomo = PomodoroManager::getInstance();
+            auto pomo_state = pomo.getState();
+            if (pomo_state != PomodoroManager::IDLE && self->pomo_countdown_label_) {
+                // 计算进度（千分比）
+                int total = pomo.getTotalSeconds();
+                int remaining = pomo.getRemainingSeconds();
+                int progress = 0;
+                if (total > 0) {
+                    progress = ((total - remaining) * 1000) / total;
+                }
+
+                // 状态文字
+                const char* state_text = "倒计时中";
+                if (pomo_state == PomodoroManager::PAUSED) {
+                    state_text = "已暂停";
+                }
+
+                // 设定信息
+                char info_buf[64];
+                snprintf(info_buf, sizeof(info_buf), "共 %d 分钟", pomo.getMinutes());
+
+                // 更新 UI
+                self->UpdatePomodoroDisplay(
+                    state_text,
+                    pomo.getRemainingTimeStr().c_str(),
+                    progress,
+                    info_buf
+                );
+
+                // 番茄钟运行中时，覆盖底部 AI 卡的显示
+                // 只在 AI 不说话时更新（说话时由 SetChatMessage 管理）
+                if (ds != kDeviceStateSpeaking) {
+                    DisplayLockGuard pomo_lock(self);
+                    if (self->pomo_emotion_label_) {
+                        const char* pomo_emoji = (pomo_state == PomodoroManager::PAUSED) ? "暂停" : "专注";
+                        lv_label_set_text(self->pomo_emotion_label_, pomo_emoji);
+                    }
+                    if (self->pomo_chat_status_label_) {
+                        char pomo_status_buf[64];
+                        if (pomo_state == PomodoroManager::PAUSED) {
+                            snprintf(pomo_status_buf, sizeof(pomo_status_buf), "已暂停 · 剩余 %s", pomo.getRemainingTimeStr().c_str());
+                        } else {
+                            snprintf(pomo_status_buf, sizeof(pomo_status_buf), "专注中 · 剩余 %s", pomo.getRemainingTimeStr().c_str());
+                        }
+                        lv_label_set_long_mode(self->pomo_chat_status_label_, LV_LABEL_LONG_WRAP);
+                        lv_label_set_text(self->pomo_chat_status_label_, pomo_status_buf);
+                    }
+                }
+            }
+        }
 
         // ===== 省电模式检测 =====
         // 5 分钟无活动（无按钮、无 AI 对话）时进入省电模式，降低刷新频率

@@ -25,13 +25,15 @@
 //   rlcd_driver.h/cc      - RLCD 硬件驱动层（SPI、像素映射、初始化命令）
 //   weather_ui.cc          - 天气站 UI 布局（SetupWeatherUI）
 //   music_ui.cc            - 音乐页 UI 布局（SetupMusicUI）
-//   data_update_task.cc    - 后台数据更新任务（时间/天气/传感器/电池/WiFi/AI状态）
+//   pomodoro_ui.cc         - 番茄钟 UI 布局（SetupPomodoroUI）
+//   data_update_task.cc    - 后台数据更新任务（时间/天气/传感器/电池/WiFi/AI状态/番茄钟）
 //   custom_lcd_display.cc  - 核心类（构造/析构/AI适配/备忘录/基类重写）
 class CustomLcdDisplay : public LcdDisplay {
 private:
     enum DisplayMode {
         MODE_WEATHER = 0,
         MODE_MUSIC = 1,
+        MODE_POMODORO = 2,
     };
     DisplayMode display_mode_ = MODE_WEATHER;
 
@@ -39,6 +41,7 @@ private:
     RlcdDriver *rlcd_ = nullptr;
     lv_obj_t *weather_page_ = nullptr;
     lv_obj_t *music_page_ = nullptr;
+    lv_obj_t *pomodoro_page_ = nullptr;
 
     // ===== 天气站 UI 组件 =====
     // 状态栏（右上角浮动胶囊）
@@ -73,6 +76,20 @@ private:
     lv_obj_t *music_emotion_label_ = nullptr; // 音乐页面：小智情绪标签
     lv_obj_t *music_emotion_img_ = nullptr;   // 音乐页面：小智表情图片（和天气页 emotion_img_ 对应）
 
+    // ===== 番茄钟 UI 组件 =====
+    lv_obj_t *pomo_state_label_ = nullptr;       // 状态文字（"专注中"/"休息中"/"已暂停"）
+    lv_obj_t *pomo_countdown_label_ = nullptr;   // 大号倒计时 "25:00"
+    lv_obj_t *pomo_progress_bar_ = nullptr;      // 进度条
+    lv_obj_t *pomo_info_label_ = nullptr;        // 设定信息（"25分钟 专注 / 5分钟 休息"）
+    lv_obj_t *pomo_time_label_ = nullptr;        // 顶部时钟
+    lv_obj_t *pomo_sensor_label_ = nullptr;      // 顶部温湿度
+    lv_obj_t *pomo_chat_status_label_ = nullptr; // AI 状态文字
+    lv_obj_t *pomo_emotion_label_ = nullptr;     // 情绪文字
+    lv_obj_t *pomo_emotion_img_ = nullptr;       // 表情图片
+    lv_obj_t *pomo_wifi_icon_img_ = nullptr;     // 状态栏 WiFi 图标
+    lv_obj_t *pomo_battery_icon_img_ = nullptr;  // 状态栏电池图标
+    lv_obj_t *pomo_battery_pct_label_ = nullptr; // 状态栏电量文字
+
     // 图片图标（不能用基类的 label，因为我们用 lv_image 而不是 Font Awesome 文字）
     lv_obj_t *wifi_icon_img_ = nullptr;
     lv_obj_t *battery_icon_img_ = nullptr;
@@ -103,9 +120,10 @@ private:
     // LVGL flush 回调（将 RGB565 转换为 1-bit 并刷新到 RLCD）
     static void Lvgl_flush_cb(lv_display_t * disp, const lv_area_t * area, uint8_t * color_p);
 
-    // UI 创建（实现在 weather_ui.cc / music_ui.cc）
+    // UI 创建（实现在 weather_ui.cc / music_ui.cc / pomodoro_ui.cc）
     void SetupWeatherUI();
     void SetupMusicUI();
+    void SetupPomodoroUI();
     void ApplyDisplayMode();
     
     // 备忘录
@@ -157,6 +175,12 @@ public:
     void RefreshMemoDisplayInternal();   // 不获取锁（已持锁时用这个，避免死锁）
     void CycleDisplayMode();
     bool IsMusicMode() const { return display_mode_ == MODE_MUSIC; }
+    bool IsPomodoroMode() const { return display_mode_ == MODE_POMODORO; }
+    void SwitchToPomodoroPage();
+
+    // 番茄钟 UI 更新方法
+    void UpdatePomodoroDisplay(const char* state_text, const char* countdown_text,
+                               int progress_permille, const char* info_text);
 };
 
 #endif

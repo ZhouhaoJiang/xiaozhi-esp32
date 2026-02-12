@@ -17,6 +17,8 @@
 #include <cJSON.h>
 #include "lvgl.h"
 #include "managers/sensor_manager.h"
+#include "managers/sdcard_manager.h"
+#include "managers/pomodoro_manager.h"
 
 // 声明小智字体（用于系统信息显示时临时切换字体大小）
 LV_FONT_DECLARE(font_puhui_14_1);
@@ -76,6 +78,16 @@ private:
         // 初始化传感器（使用同一条 I2C 总线）
         SensorManager::getInstance().init(i2c_bus_);
         ESP_LOGI(TAG, "传感器初始化完成");
+    }
+
+    void InitializeSdcard() {
+        // 初始化 SD 卡（SDMMC 模式，板载 SD 卡槽默认引脚）
+        bool ok = SdcardManager::getInstance().init();
+        if (ok) {
+            ESP_LOGI(TAG, "SD 卡初始化成功");
+        } else {
+            ESP_LOGW(TAG, "SD 卡初始化失败（可能未插卡），白噪音功能不可用");
+        }
     }
 
     void InitializeButtons() { 
@@ -337,10 +349,10 @@ private:
         // ===== 屏幕切换工具（语音可调用）=====
         mcp_server.AddTool(
             "self.disp.switch",
-            "Switch display page between weather and music.\n"
-            "Use when user says: '切到音乐页', '打开天气页', '切换屏幕', 'switch screen', 'show music page'.\n"
+            "Switch display page between weather, music, and pomodoro.\n"
+            "Use when user says: '切到音乐页', '打开天气页', '切换屏幕', '打开番茄钟页面', 'switch screen'.\n"
             "Args:\n"
-            "  `mode`: 'toggle' | 'music' | 'weather' (default: 'toggle')",
+            "  `mode`: 'toggle' | 'music' | 'weather' | 'pomodoro' (default: 'toggle')",
             PropertyList({
                 Property("mode", kPropertyTypeString, std::string("toggle"))
             }),
@@ -350,35 +362,128 @@ private:
                 }
 
                 auto mode = properties["mode"].value<std::string>();
-                bool is_music = display_->IsMusicMode();
-                bool need_switch = false;
 
-                // 统一小写判断，避免 LLM 传参大小写不一致导致失效
+                // 统一小写判断
                 for (auto& ch : mode) {
                     if (ch >= 'A' && ch <= 'Z') {
                         ch = static_cast<char>(ch - 'A' + 'a');
                     }
                 }
 
+                display_->NotifyUserActivity();
+
                 if (mode == "toggle") {
-                    need_switch = true;
-                } else if (mode == "music") {
-                    need_switch = !is_music;
-                } else if (mode == "weather") {
-                    need_switch = is_music;
-                } else {
-                    return std::string("参数 mode 无效，请使用 toggle/music/weather");
-                }
-
-                if (need_switch) {
-                    display_->NotifyUserActivity();
                     display_->CycleDisplayMode();
-                    is_music = display_->IsMusicMode();
+                } else if (mode == "music") {
+                    display_->SwitchToMusicPage();
+                } else if (mode == "weather") {
+                    display_->SwitchToWeatherPage();
+                } else if (mode == "pomodoro") {
+                    display_->SwitchToPomodoroPage();
+                } else {
+                    return std::string("参数 mode 无效，请使用 toggle/music/weather/pomodoro");
                 }
 
-                return is_music ? std::string("已切换到音乐页") : std::string("已切换到天气页");
+                if (display_->IsMusicMode()) return std::string("已切换到音乐页");
+                if (display_->IsPomodoroMode()) return std::string("已切换到番茄钟页");
+                return std::string("已切换到天气页");
             }
         );
+
+        // ===== 番茄钟工具 =====
+        mcp_server.AddTool("self.pomodoro.start",
+            "Start a countdown timer with optional white noise from SD card.\n"
+            "Use when user says: '开始番茄钟', '专注25分钟', '倒计时10分钟', 'start pomodoro', '番茄工作法'\n"
+            "Args:\n"
+            "  `minutes`: Countdown duration in minutes (default 25, range 1-120)\n"
+            "  `white_noise`: Whether to play white noise from SD card (default true)",
+            PropertyList({
+                Property("minutes", kPropertyTypeInteger, 1, 120),
+                Property("white_noise", kPropertyTypeBoolean)
+            }),
+            [this](const PropertyList& properties) -> ReturnValue {
+                int minutes = 25;
+                bool noise = true;
+                
+                // 安全获取参数（带默认值）
+                try { minutes = properties["minutes"].value<int>(); } catch (...) { minutes = 25; }
+                try { noise = properties["white_noise"].value<bool>(); } catch (...) { noise = true; }
+
+                if (minutes < 1) minutes = 1;
+                if (minutes > 120) minutes = 120;
+
+                auto& pomo = PomodoroManager::getInstance();
+                bool ok = pomo.start(minutes, noise);
+                
+                // 自动切换到番茄钟页面
+                if (ok && display_) {
+                    display_->NotifyUserActivity();
+                    display_->SwitchToPomodoroPage();
+                }
+
+                if (ok) {
+                    char buf[128];
+                    snprintf(buf, sizeof(buf), 
+                             "番茄钟已启动：%d 分钟倒计时，白噪音%s",
+                             minutes, noise ? "已开启" : "已关闭");
+                    return std::string(buf);
+                }
+                return std::string("番茄钟启动失败");
+            });
+
+        mcp_server.AddTool("self.pomodoro.stop",
+            "Stop the current Pomodoro timer and white noise.\n"
+            "Use when user says: '停止番茄钟', '结束专注', 'stop pomodoro', '不专注了'",
+            PropertyList(),
+            [this](const PropertyList&) -> ReturnValue {
+                auto& pomo = PomodoroManager::getInstance();
+                if (pomo.getState() == PomodoroManager::IDLE) {
+                    return std::string("番茄钟当前没有在运行");
+                }
+                pomo.stop();
+                
+                // 切回天气页
+                if (display_) {
+                    display_->SwitchToWeatherPage();
+                }
+                return std::string("番茄钟已停止");
+            });
+
+        mcp_server.AddTool("self.pomodoro.status",
+            "Get current Pomodoro timer status.\n"
+            "Use when user asks: '番茄钟状态', '还剩多少时间', '专注了多久', 'pomodoro status'",
+            PropertyList(),
+            [](const PropertyList&) -> ReturnValue {
+                auto& pomo = PomodoroManager::getInstance();
+                auto state = pomo.getState();
+                if (state == PomodoroManager::IDLE) {
+                    return std::string("番茄钟当前未运行。你可以说「开始番茄钟」来启动。");
+                }
+
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                         "番茄钟状态：%s，剩余 %s，共设定 %d 分钟",
+                         pomo.getStateText().c_str(),
+                         pomo.getRemainingTimeStr().c_str(),
+                         pomo.getMinutes());
+                return std::string(buf);
+            });
+
+        mcp_server.AddTool("self.pomodoro.pause",
+            "Pause or resume the current Pomodoro timer.\n"
+            "Use when user says: '暂停番茄钟', '继续番茄钟', 'pause pomodoro', 'resume'",
+            PropertyList(),
+            [](const PropertyList&) -> ReturnValue {
+                auto& pomo = PomodoroManager::getInstance();
+                auto state = pomo.getState();
+                if (state == PomodoroManager::IDLE) {
+                    return std::string("番茄钟当前未运行，无法暂停");
+                }
+                pomo.togglePause();
+                return pomo.getState() == PomodoroManager::PAUSED 
+                    ? std::string("番茄钟已暂停") 
+                    : std::string("番茄钟已恢复");
+            });
 
         // ===== 备忘录工具（多条列表模式）=====
         // NVS key "items" 存储 JSON 数组: [{"t":"15:00","c":"开会"}, ...]
@@ -628,6 +733,7 @@ public:
     CustomBoard() : boot_button_(BOOT_BUTTON_GPIO), user_button_(USER_BUTTON_GPIO) {    
         InitializeI2c();
         InitializeSensors();  // 在 I2C 初始化后立即初始化传感器
+        InitializeSdcard();   // SD 卡初始化（白噪音播放需要）
         InitializeButtons();     
         InitializeTools();
         InitializeLcdDisplay();
