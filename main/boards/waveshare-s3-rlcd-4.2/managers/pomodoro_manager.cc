@@ -38,7 +38,8 @@ bool PomodoroManager::start(int minutes, bool white_noise) {
     if (white_noise && SdcardManager::getInstance().isMounted()) {
         auto files = scanWhiteNoiseFiles();
         if (!files.empty()) {
-            xTaskCreatePinnedToCore(WhiteNoiseTask, "white_noise", 8 * 1024, this, 3, &noise_task_handle_, 0);
+            // 白噪音任务用较低优先级，避免影响 UI 与语音主流程
+            xTaskCreatePinnedToCore(WhiteNoiseTask, "white_noise", 8 * 1024, this, 1, &noise_task_handle_, 0);
         } else {
             ESP_LOGW(TAG, "SD 卡 %s 目录下没有找到 MP3 文件，跳过白噪音", WHITE_NOISE_DIR);
         }
@@ -82,7 +83,8 @@ void PomodoroManager::togglePause() {
             noise_stop_requested_.store(false);
             auto files = scanWhiteNoiseFiles();
             if (!files.empty() && noise_task_handle_ == nullptr) {
-                xTaskCreatePinnedToCore(WhiteNoiseTask, "white_noise", 8 * 1024, this, 3, &noise_task_handle_, 0);
+                // 白噪音任务用较低优先级，避免影响 UI 与语音主流程
+                xTaskCreatePinnedToCore(WhiteNoiseTask, "white_noise", 8 * 1024, this, 1, &noise_task_handle_, 0);
             }
         }
         ESP_LOGI(TAG, "番茄钟已恢复");
@@ -189,6 +191,7 @@ void PomodoroManager::WhiteNoiseTask(void* arg) {
     auto* self = static_cast<PomodoroManager*>(arg);
     auto& board = Board::GetInstance();
     auto codec = board.GetAudioCodec();
+    auto& app = Application::GetInstance();
 
     ESP_LOGI(TAG, "白噪音播放任务启动");
 
@@ -213,6 +216,7 @@ void PomodoroManager::WhiteNoiseTask(void* arg) {
     esp_audio_simple_dec_handle_t decoder = nullptr;
     esp_ae_rate_cvt_handle_t resampler = nullptr;
     bool decoder_registered = false;
+    bool noise_output_enabled = false;
 
     in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
     out_buf = static_cast<uint8_t*>(heap_caps_malloc(out_buf_size, MALLOC_CAP_8BIT));
@@ -260,6 +264,7 @@ void PomodoroManager::WhiteNoiseTask(void* arg) {
 
         if (!codec->output_enabled()) {
             codec->EnableOutput(true);
+            noise_output_enabled = true;
         }
 
         bool info_ready = false;
@@ -268,6 +273,24 @@ void PomodoroManager::WhiteNoiseTask(void* arg) {
 
         // 读取并解码文件
         while (!self->noise_stop_requested_.load()) {
+            // AI 语音会话期间让出音频通道，避免与白噪音抢占导致卡顿
+            DeviceState ds = app.GetDeviceState();
+            // 只在真正占用播报链路时让出音频，避免待命监听阶段把白噪音长期静音
+            const bool in_voice_session = (ds == kDeviceStateConnecting ||
+                                           ds == kDeviceStateSpeaking);
+            if (in_voice_session) {
+                if (noise_output_enabled && codec->output_enabled()) {
+                    codec->EnableOutput(false);
+                    noise_output_enabled = false;
+                }
+                vTaskDelay(pdMS_TO_TICKS(120));
+                continue;
+            }
+            if (!noise_output_enabled && !codec->output_enabled()) {
+                codec->EnableOutput(true);
+                noise_output_enabled = true;
+            }
+
             int read_bytes = fread(in_buf, 1, kReadBufSize, fp);
             if (read_bytes <= 0) {
                 // 文件读完，跳出内层循环准备重新播放
@@ -370,6 +393,7 @@ void PomodoroManager::WhiteNoiseTask(void* arg) {
                     if (!pcm.empty()) {
                         if (!codec->output_enabled()) {
                             codec->EnableOutput(true);
+                            noise_output_enabled = true;
                         }
                         codec->OutputData(pcm);
                     }
@@ -415,6 +439,9 @@ cleanup:
     }
     if (in_buf) heap_caps_free(in_buf);
     if (out_buf) heap_caps_free(out_buf);
+    if (noise_output_enabled && codec->output_enabled()) {
+        codec->EnableOutput(false);
+    }
 
     self->noise_task_handle_ = nullptr;
     ESP_LOGI(TAG, "白噪音播放任务退出");

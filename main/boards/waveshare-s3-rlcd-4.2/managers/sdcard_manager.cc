@@ -63,6 +63,22 @@ std::vector<std::string> SdcardManager::listFiles(const char* dir_path, const ch
     DIR* dir = opendir(dir_path);
     if (!dir) {
         ESP_LOGW(TAG, "无法打开目录: %s", dir_path);
+        // 目录打不开时，输出 SD 根目录内容做自检，方便排查目录名/层级问题
+        DIR* root_dir = opendir(mount_point_);
+        if (root_dir) {
+            ESP_LOGW(TAG, "开始列出 SD 根目录内容: %s", mount_point_);
+            struct dirent* root_entry;
+            while ((root_entry = readdir(root_dir)) != nullptr) {
+                if (strcmp(root_entry->d_name, ".") == 0 || strcmp(root_entry->d_name, "..") == 0) {
+                    continue;
+                }
+                const char* type_text = (root_entry->d_type == DT_DIR) ? "DIR" : "FILE";
+                ESP_LOGW(TAG, "  - [%s] %s", type_text, root_entry->d_name);
+            }
+            closedir(root_dir);
+        } else {
+            ESP_LOGW(TAG, "无法打开 SD 根目录进行自检: %s", mount_point_);
+        }
         return files;
     }
 
