@@ -275,8 +275,10 @@ void PomodoroManager::WhiteNoiseTask(void* arg) {
         while (!self->noise_stop_requested_.load()) {
             // AI 语音会话期间让出音频通道，避免与白噪音抢占导致卡顿
             DeviceState ds = app.GetDeviceState();
-            // 只在真正占用播报链路时让出音频，避免待命监听阶段把白噪音长期静音
+            // 语音链路占用期间（连接/聆听/播报）都让出音频输出，
+            // 避免白噪音与 ASR/TTS 反复抢占导致 I2S 通道频繁重开。
             const bool in_voice_session = (ds == kDeviceStateConnecting ||
+                                           ds == kDeviceStateListening ||
                                            ds == kDeviceStateSpeaking);
             if (in_voice_session) {
                 if (noise_output_enabled && codec->output_enabled()) {

@@ -359,20 +359,45 @@ AI：  调用 self.system.info 获取数据
 - **ESP-IDF：** v5.5.1 或 v5.5.2
 - **Python：** 3.8+
 
-### 步骤
+### 快速启动（本机实测可用）
+
+> 适用于当前开发机路径：`/Users/xx/.espressif/v5.5.2/esp-idf`
+
 ```bash
-# 1. 克隆仓库
-git clone <your-repo-url>
-cd xiaozhi-esp32
+# 1) 进入项目目录
+cd /Users/xx/Projects/ESP32-S3-RLCD-4.2/xiaozhi-esp32
 
-# 2. 配置（首次）
-idf.py menuconfig
-# → WiFi Configuration Method 选择 Esp Blufi 或 Hotspot
+# 2) 先激活已存在的 Python 环境（避免 export.sh 误用系统 python3）
+source /Users/xx/.espressif/python_env/idf5.5_py3.14_env/bin/activate
 
-# 3. 编译
+# 3) 再加载 ESP-IDF 环境
+source /Users/xx/.espressif/v5.5.2/esp-idf/export.sh
+
+# 4) 验证环境（能看到路径就正常）
+which idf.py
+echo $IDF_PATH
+
+# 5) 编译
 idf.py build
 
-# 4. 烧录 + 监控串口
+# 6) 烧录 + 监控串口
+idf.py flash monitor
+```
+
+### 通用步骤（换机器时参考）
+
+```bash
+# 1. 进入项目
+cd xiaozhi-esp32
+
+# 2. 加载 ESP-IDF 环境（路径按你的安装位置修改）
+source <your-esp-idf-path>/export.sh
+
+# 3. 首次配置（可选）
+idf.py menuconfig
+
+# 4. 编译 / 烧录
+idf.py build
 idf.py flash monitor
 ```
 
@@ -387,6 +412,16 @@ idf.py erase-flash
 # 监控串口输出
 idf.py monitor
 ```
+
+### 常见报错（启动阶段）
+
+#### `zsh: command not found: idf.py`
+说明：ESP-IDF 环境还没加载成功。  
+处理：先执行 Python 环境激活，再执行 `export.sh`（见上方“快速启动”）。
+
+#### `ERROR: ESP-IDF Python virtual environment ... not found`
+说明：`export.sh` 检测到的 `python3` 版本与你安装的 IDF Python 环境不一致。  
+处理：先手动 `source` 正确的 `idf5.5_py3.14_env/bin/activate`，再执行 `export.sh`。
 
 ---
 
@@ -452,16 +487,22 @@ idf.py monitor
 
 ---
 
-## 开发计划
+## 功能状态
 
-详见 [`docs/2026-02-10-计划文档.md`](../../../docs/2026-02-10-计划文档.md)
+为避免 README 中的计划列表长期失真，这里仅维护当前功能状态与方向性建议。
 
-### 近期计划
-- [ ] 电源管理优化（自动休眠）
-- [ ] 备忘录增强（日期提醒、重复提醒）
-- [ ] 传感器历史数据记录
-- [ ] 多屏幕模式切换
-- [ ] 番茄钟功能
+### 已实现
+- 自动省电模式（5 分钟无活动后降频刷新）
+- 多屏幕模式切换（天气页 / 音乐页 / 番茄钟页）
+- 番茄钟（启动 / 暂停 / 恢复 / 停止）与白噪音播放
+- MCP 驱动天气回写（`self.weather.update`）
+- 备忘录基础能力（新增 / 列表 / 完成 / 清空）
+
+### 可选后续（按需做，不承诺时间）
+- 备忘录增强（日期提醒、重复提醒）
+- 传感器历史数据记录与可视化
+- 更细粒度电源策略（空闲阶段网络与外设协同降功耗）
+- 文档与故障排查持续补充
 
 ---
 
@@ -484,4 +525,4 @@ idf.py monitor
 
 ---
 
-**最后更新：** 2026-02-10
+**最后更新：** 2026-02-25
