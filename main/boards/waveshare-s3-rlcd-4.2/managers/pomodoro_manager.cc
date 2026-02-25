@@ -218,6 +218,8 @@ void PomodoroManager::WhiteNoiseTask(void* arg) {
     bool decoder_registered = false;
     bool noise_output_enabled = false;
 
+    auto& audio_svc = app.GetAudioService();
+
     in_buf = static_cast<uint8_t*>(heap_caps_malloc(kReadBufSize, MALLOC_CAP_8BIT));
     out_buf = static_cast<uint8_t*>(heap_caps_malloc(out_buf_size, MALLOC_CAP_8BIT));
     if (!in_buf || !out_buf) {
@@ -262,6 +264,8 @@ void PomodoroManager::WhiteNoiseTask(void* arg) {
             break;
         }
 
+        audio_svc.SetExternalPlaybackActive(true);
+
         if (!codec->output_enabled()) {
             codec->EnableOutput(true);
             noise_output_enabled = true;
@@ -281,15 +285,21 @@ void PomodoroManager::WhiteNoiseTask(void* arg) {
                                            ds == kDeviceStateListening ||
                                            ds == kDeviceStateSpeaking);
             if (in_voice_session) {
-                if (noise_output_enabled && codec->output_enabled()) {
-                    codec->EnableOutput(false);
+                if (noise_output_enabled) {
+                    audio_svc.SetExternalPlaybackActive(false);
+                    if (codec->output_enabled()) {
+                        codec->EnableOutput(false);
+                    }
                     noise_output_enabled = false;
                 }
                 vTaskDelay(pdMS_TO_TICKS(120));
                 continue;
             }
-            if (!noise_output_enabled && !codec->output_enabled()) {
-                codec->EnableOutput(true);
+            if (!noise_output_enabled) {
+                audio_svc.SetExternalPlaybackActive(true);
+                if (!codec->output_enabled()) {
+                    codec->EnableOutput(true);
+                }
                 noise_output_enabled = true;
             }
 
@@ -441,6 +451,7 @@ cleanup:
     }
     if (in_buf) heap_caps_free(in_buf);
     if (out_buf) heap_caps_free(out_buf);
+    audio_svc.SetExternalPlaybackActive(false);
     if (noise_output_enabled && codec->output_enabled()) {
         codec->EnableOutput(false);
     }

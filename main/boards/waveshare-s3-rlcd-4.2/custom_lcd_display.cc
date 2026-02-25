@@ -98,6 +98,9 @@ CustomLcdDisplay::CustomLcdDisplay(esp_lcd_panel_io_handle_t panel_io,
     SetupWeatherUI();
     SetupMusicUI();
     SetupPomodoroUI();
+    // 告诉显示框架：当前自定义 UI 已经初始化完成
+    // 否则基类的 SetStatus/ShowNotification 会一直误判为“UI 未准备好”
+    setup_ui_called_ = true;
     ApplyDisplayMode();
 
     // 5. 启动时从 NVS 加载上次保存的备忘录
