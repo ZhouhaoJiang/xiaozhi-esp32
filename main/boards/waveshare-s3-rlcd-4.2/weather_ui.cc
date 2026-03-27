@@ -179,7 +179,7 @@ void CustomLcdDisplay::SetupWeatherUI() {
     lv_obj_set_style_text_color(weather_label_, lv_color_white(), 0);
     lv_obj_set_style_text_align(weather_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(weather_label_, LV_ALIGN_BOTTOM_MID, 0, -6);
-    lv_label_set_text(weather_label_, "-- --°C");
+    lv_label_set_text(weather_label_, "天气未更新");
 
     // --- 左下：AI 对话卡片（小智接管这里）---
     // 布局：[左侧表情区 64px | 分隔线 | 右侧对话文字区]
