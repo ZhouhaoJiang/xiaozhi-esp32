@@ -17,6 +17,9 @@ LV_FONT_DECLARE(alibaba_puhui_16);
 LV_FONT_DECLARE(alibaba_puhui_24);
 LV_FONT_DECLARE(alibaba_puhui_48);
 LV_FONT_DECLARE(alibaba_black_64);
+#ifdef CONFIG_LV_FONT_MONTSERRAT_36
+LV_FONT_DECLARE(lv_font_montserrat_36);
+#endif
 
 // 声明小智自带字体（7415 个常用汉字，用于 AI 对话区域）
 LV_FONT_DECLARE(font_puhui_16_4);  // 16px 标准字体
@@ -55,21 +58,39 @@ void CustomLcdDisplay::SetupWeatherUI() {
     const lv_font_t *font_clock  = &alibaba_black_64;
     // 小智完整字库（7415 常用汉字，AI 对话区域专用）
     const lv_font_t *font_ai     = &font_puhui_16_4;
+#ifdef CONFIG_LV_FONT_MONTSERRAT_36
+    const lv_font_t *font_date = &lv_font_montserrat_36;
+#else
+    const lv_font_t *font_date = font_normal;
+#endif
+
+    // ===== 2×2 卡片网格布局（同时用于右上胶囊与日历卡片对齐）=====
+    const int pad = 8;
+    const int gap = 6;
+    const int top_y = 36;
+    const int top_row_h = 128;
+    const int bot_row_h = 300 - top_y - top_row_h - gap - pad;  // = 122
+    const int left_w = 248;
+    const int right_w = 400 - pad * 2 - left_w - gap;  // = 130
+    const int bot_y = top_y + top_row_h + gap;
+    const int bot_total_w = 400 - pad * 2 - gap;
+    const int bot_card_w = bot_total_w * 2 / 3;  // AI 区域 = 252
+    const int music_card_w = bot_total_w - bot_card_w;  // 音乐区域 = 126
 
     // ===== 状态栏（右上角白底胶囊）=====
     lv_obj_t *status_bar = lv_obj_create(screen);
-    lv_obj_set_size(status_bar, 115, 28);
+    lv_obj_set_size(status_bar, right_w, 28);
     lv_obj_set_style_bg_opa(status_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(status_bar, lv_color_white(), 0);
     lv_obj_set_style_border_width(status_bar, 0, 0);
     lv_obj_set_style_radius(status_bar, 14, 0);
-    lv_obj_align(status_bar, LV_ALIGN_TOP_RIGHT, -8, 4);
+    lv_obj_align(status_bar, LV_ALIGN_TOP_RIGHT, -pad, 4);
     lv_obj_set_style_pad_all(status_bar, 0, 0);
     lv_obj_set_style_pad_left(status_bar, 8, 0);
     lv_obj_set_style_pad_right(status_bar, 8, 0);
     lv_obj_remove_flag(status_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(status_bar, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(status_bar, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(status_bar, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_column(status_bar, 5, 0);
 
     // WiFi 图标（我们自己的图片图标，不给基类用）
@@ -90,21 +111,13 @@ void CustomLcdDisplay::SetupWeatherUI() {
     sensor_label_ = lv_label_create(screen);
     lv_obj_set_style_text_font(sensor_label_, font_small, 0);
     lv_obj_set_style_text_color(sensor_label_, lv_color_white(), 0);
-    lv_obj_align(sensor_label_, LV_ALIGN_TOP_LEFT, 10, 8);
     lv_label_set_text(sensor_label_, "--.-°C  --.-%");
-
-    // ===== 2×2 卡片网格布局 =====
-    const int pad = 8;
-    const int gap = 6;
-    const int top_y = 36;
-    const int top_row_h = 128;
-    const int bot_row_h = 300 - top_y - top_row_h - gap - pad;  // = 122
-    const int left_w = 248;
-    const int right_w = 400 - pad * 2 - left_w - gap;  // = 130
-    const int bot_y = top_y + top_row_h + gap;
-    const int bot_total_w = 400 - pad * 2 - gap;
-    const int bot_card_w = bot_total_w * 2 / 3;  // AI 区域 = 252
-    const int music_card_w = bot_total_w - bot_card_w;  // 音乐区域 = 126
+    lv_obj_update_layout(sensor_label_);
+    int sensor_h = lv_obj_get_height(sensor_label_);
+    int sensor_y = 4 + (28 - sensor_h) / 2;
+    if (sensor_y < 0) sensor_y = 0;
+    const int sensor_x = pad + 2;
+    lv_obj_align(sensor_label_, LV_ALIGN_TOP_LEFT, sensor_x, sensor_y);
 
     // --- 左上：时钟卡片 ---
     lv_obj_t *time_card = lv_obj_create(screen);
@@ -150,10 +163,14 @@ void CustomLcdDisplay::SetupWeatherUI() {
 
     // "TUE" 星期标签
     day_label_ = lv_label_create(calendar_card);
-    lv_obj_set_style_text_font(day_label_, font_normal, 0);
+    lv_obj_set_style_text_font(day_label_, font_ai, 0);
     lv_obj_set_style_text_color(day_label_, lv_color_white(), 0);
-    lv_obj_align(day_label_, LV_ALIGN_TOP_MID, 0, 8);
     lv_label_set_text(day_label_, "---");
+    lv_obj_update_layout(day_label_);
+    int day_h = lv_obj_get_height(day_label_);
+    int day_y = (day_header_h - day_h) / 2;
+    if (day_y < 0) day_y = 0;
+    lv_obj_align(day_label_, LV_ALIGN_TOP_MID, 0, day_y);
 
     // 日期数字白色区域
     int date_area_h = 55;
@@ -167,7 +184,7 @@ void CustomLcdDisplay::SetupWeatherUI() {
     lv_obj_remove_flag(date_area, LV_OBJ_FLAG_SCROLLABLE);
 
     date_num_label_ = lv_label_create(date_area);
-    lv_obj_set_style_text_font(date_num_label_, font_large, 0);
+    lv_obj_set_style_text_font(date_num_label_, font_date, 0);
     lv_obj_set_style_text_color(date_num_label_, lv_color_black(), 0);
     lv_obj_set_style_text_align(date_num_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(date_num_label_);
@@ -179,7 +196,7 @@ void CustomLcdDisplay::SetupWeatherUI() {
     lv_obj_set_style_text_color(weather_label_, lv_color_white(), 0);
     lv_obj_set_style_text_align(weather_label_, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(weather_label_, LV_ALIGN_BOTTOM_MID, 0, -6);
-    lv_label_set_text(weather_label_, "-- --°C");
+    lv_label_set_text(weather_label_, "天气未更新");
 
     // --- 左下：AI 对话卡片（小智接管这里）---
     // 布局：[左侧表情区 64px | 分隔线 | 右侧对话文字区]

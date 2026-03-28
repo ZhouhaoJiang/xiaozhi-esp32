@@ -5,6 +5,7 @@
             "name": "waveshare-s3-rlcd-4.2",
             "sdkconfig_append": [
                 "CONFIG_USE_WECHAT_MESSAGE_STYLE=n",
+                "CONFIG_LV_FONT_MONTSERRAT_36=y",
                 "CONFIG_USE_DEVICE_AEC=y"
             ]
         }

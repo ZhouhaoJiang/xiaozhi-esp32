@@ -26,7 +26,13 @@
 #include "managers/sensor_manager.h"
 #include "managers/weather_manager.h"
 #include "managers/pomodoro_manager.h"
+#if __has_include("secret_config.h")
 #include "secret_config.h"
+#endif
+
+#ifndef TIMEZONE_STRING
+#define TIMEZONE_STRING "CST-8"
+#endif
 
 // 声明状态栏图标（DataUpdateTask 需要更新图标）
 LV_IMAGE_DECLARE(ui_img_wifi);
@@ -210,15 +216,23 @@ void CustomLcdDisplay::DataUpdateTask(void *arg) {
                 if (self->music_time_label_) lv_label_set_text(self->music_time_label_, time_buf);
                 if (self->pomo_time_label_) lv_label_set_text(self->pomo_time_label_, time_buf);
 
-                const char *weeks_en[] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
-                if (self->day_label_) lv_label_set_text(self->day_label_, weeks_en[timeinfo.tm_wday]);
+                int wday = timeinfo.tm_wday;
+                if (wday < 0 || wday > 6) {
+                    wday = 0;
+                }
+#if defined(CONFIG_LANGUAGE_EN_US)
+                const char *weeks[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+#else
+                const char *weeks[] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+#endif
+                if (self->day_label_) lv_label_set_text(self->day_label_, weeks[wday]);
 
-                char date_buf[8];
-                snprintf(date_buf, sizeof(date_buf), "%d", timeinfo.tm_mday);
+                char date_buf[16];
+                snprintf(date_buf, sizeof(date_buf), "%02d/%02d", timeinfo.tm_mon + 1, timeinfo.tm_mday);
                 if (self->date_num_label_) lv_label_set_text(self->date_num_label_, date_buf);
 
                 self->last_min_ = timeinfo.tm_min;
-                ESP_LOGI(TAG, "时间已更新: %s, %s, %d日", time_buf, weeks_en[timeinfo.tm_wday], timeinfo.tm_mday);
+                ESP_LOGI(TAG, "时间已更新: %s, %s, %d日", time_buf, weeks[wday], timeinfo.tm_mday);
             }
         }  // DisplayLockGuard 自动释放
 

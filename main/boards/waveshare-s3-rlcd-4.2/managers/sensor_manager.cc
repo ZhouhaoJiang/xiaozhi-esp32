@@ -1,5 +1,20 @@
 #include "sensor_manager.h"
+#if __has_include("../secret_config.h")
 #include "../secret_config.h"
+#endif
+
+#ifndef TIMEZONE_STRING
+#define TIMEZONE_STRING "CST-8"
+#endif
+#ifndef NTP_SERVER
+#define NTP_SERVER "pool.ntp.org"
+#endif
+#ifndef WEATHER_API_KEY
+#define WEATHER_API_KEY ""
+#endif
+#ifndef WEATHER_API_HOST
+#define WEATHER_API_HOST ""
+#endif
 #include "esp_log.h"
 #include "esp_sntp.h"
 #include "esp_netif_sntp.h"

@@ -87,7 +87,7 @@ void CustomLcdDisplay::SetupMusicUI() {
 
     // 右上角状态栏胶囊
     lv_obj_t *status_bar = lv_obj_create(page);
-    lv_obj_set_size(status_bar, 115, 28);
+    lv_obj_set_size(status_bar, 130, 28);
     lv_obj_set_style_bg_opa(status_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(status_bar, lv_color_white(), 0);
     lv_obj_set_style_border_width(status_bar, 0, 0);
@@ -99,7 +99,7 @@ void CustomLcdDisplay::SetupMusicUI() {
     lv_obj_set_style_pad_row(status_bar, 0, 0);
     lv_obj_remove_flag(status_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(status_bar, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(status_bar, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(status_bar, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
     music_wifi_icon_img_ = lv_image_create(status_bar);
     lv_image_set_src(music_wifi_icon_img_, &ui_img_wifi_off);
