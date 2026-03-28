@@ -150,7 +150,7 @@ void CustomLcdDisplay::SetupWeatherUI() {
 
     // "TUE" 星期标签
     day_label_ = lv_label_create(calendar_card);
-    lv_obj_set_style_text_font(day_label_, font_normal, 0);
+    lv_obj_set_style_text_font(day_label_, font_ai, 0);
     lv_obj_set_style_text_color(day_label_, lv_color_white(), 0);
     lv_obj_align(day_label_, LV_ALIGN_TOP_MID, 0, 8);
     lv_label_set_text(day_label_, "---");
