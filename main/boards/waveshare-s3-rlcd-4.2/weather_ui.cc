@@ -165,8 +165,12 @@ void CustomLcdDisplay::SetupWeatherUI() {
     day_label_ = lv_label_create(calendar_card);
     lv_obj_set_style_text_font(day_label_, font_ai, 0);
     lv_obj_set_style_text_color(day_label_, lv_color_white(), 0);
-    lv_obj_align(day_label_, LV_ALIGN_TOP_MID, 0, 8);
     lv_label_set_text(day_label_, "---");
+    lv_obj_update_layout(day_label_);
+    int day_h = lv_obj_get_height(day_label_);
+    int day_y = (day_header_h - day_h) / 2;
+    if (day_y < 0) day_y = 0;
+    lv_obj_align(day_label_, LV_ALIGN_TOP_MID, 0, day_y);
 
     // 日期数字白色区域
     int date_area_h = 55;
